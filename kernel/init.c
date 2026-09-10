@@ -8,6 +8,7 @@
 #include "kernel/syscall.h"
 #include "kernel/gdt.h"
 #include "kernel/usermode.h"
+#include "kernel/serial.h"
 #include "../drivers/fs.h"
 #include "mem.h"  
 #include "shell.h"
@@ -24,6 +25,7 @@ void main_entry() {
     for (uint8_t *p = &__bss_start; p < &__bss_end; p++) {
         *p = 0;
     }
+    serial_init();
     clear_screen();
     kprint("MxOS Kernel Loading...\n");
 
@@ -52,7 +54,7 @@ void main_entry() {
     if (create_task(task_clock, "Clock") < 0) {
         kprint("Warning: unable to create clock task.\n");
     }
-    if (create_user_task(user_task_demo, "UserDemo", user_demo_stack_top()) < 0) {
+    if (create_user_task(user_task_demo, "UserDemo", user_demo_stack_top(), user_demo_stack_size()) < 0) {
         kprint("Warning: unable to create user demo task.\n");
     }
 

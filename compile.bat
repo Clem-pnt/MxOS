@@ -31,13 +31,14 @@ echo [3/6] Modules Kernel...
 %CC% %CFLAGS% -c kernel/syscall.c -o kernel/syscall.o
 %CC% %CFLAGS% -c kernel/gdt.c -o kernel/gdt.o
 %CC% %CFLAGS% -c kernel/usermode.c -o kernel/usermode.o
+%CC% %CFLAGS% -c kernel/serial.c -o kernel/serial.o
 
 echo [4/6] Drivers...
 %CC% %CFLAGS% -c drivers/ata.c -o drivers/ata.o
 %CC% %CFLAGS% -c drivers/fs.c -o drivers/fs.o
 
 echo [5/6] Linkage et Extraction...
-%LD% %LDFLAGS% -o kernel.tmp kernel.o kernel/init.o kernel/cpu.o kernel/interrupts.o kernel/mem.o kernel/screen.o kernel/sched.o kernel/shell.o kernel/keyboard.o kernel/paging.o kernel/exceptions.o kernel/pit.o kernel/syscall.o kernel/gdt.o kernel/usermode.o drivers/ata.o drivers/fs.o
+%LD% %LDFLAGS% -o kernel.tmp kernel.o kernel/init.o kernel/cpu.o kernel/interrupts.o kernel/mem.o kernel/screen.o kernel/sched.o kernel/shell.o kernel/keyboard.o kernel/paging.o kernel/exceptions.o kernel/pit.o kernel/syscall.o kernel/gdt.o kernel/usermode.o kernel/serial.o drivers/ata.o drivers/fs.o
 
 if not exist kernel.tmp echo ERREUR: Linkage echoue ! && pause && exit /b
 %OBJCOPY% -S -O binary kernel.tmp kernel.bin

@@ -27,5 +27,6 @@ void fs_init();
 void fs_list();
 void fs_read_file(char* name);
 void fs_create_file(char* name, uint32_t start_lba, uint32_t size_sect);
+int fs_delete_file(char* name);
 int fs_write_file(char* name, const uint8_t* data, uint32_t size_bytes);
 #endif

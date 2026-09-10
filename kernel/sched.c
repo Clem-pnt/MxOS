@@ -4,6 +4,7 @@
 #include "mem.h"
 #include "pit.h"
 #include "gdt.h"
+#include "paging.h"
 
 #define MAX_TASKS 16
 // Taille de la pile allouée pour chaque tâche (noyau ou utilisateur).
@@ -73,6 +74,16 @@ uint32_t schedule(uint32_t last_esp) {
     // pointe TSS.esp0 vers le haut de la pile noyau de cette tâche.
     tss_set_kernel_stack(tasks[current_task].stack_base + TASK_STACK_SIZE);
 
+    // Bascule vers l'espace d'adressage de la tâche élue : chaque tâche
+    // ring3 a son propre répertoire de pages (isolation de sa pile
+    // utilisateur vis-à-vis des autres tâches) ; les tâches ring0 pures
+    // partagent le répertoire noyau.
+    if (tasks[current_task].addr_space >= 0) {
+        paging_switch_directory(paging_task_directory_phys(tasks[current_task].addr_space));
+    } else {
+        paging_switch_directory(paging_kernel_directory_phys());
+    }
+
     return tasks[current_task].esp;
 }
 
@@ -88,6 +99,10 @@ void task_exit_current(void) {
         if (tasks[current_task].stack_base) {
             kfree((void*)tasks[current_task].stack_base);
             tasks[current_task].stack_base = 0;
+        }
+        if (tasks[current_task].addr_space >= 0) {
+            paging_free_task_directory(tasks[current_task].addr_space);
+            tasks[current_task].addr_space = -1;
         }
     }
     for (;;) {
@@ -112,6 +127,10 @@ uint32_t task_exit_and_reschedule(uint32_t current_esp) {
         if (tasks[current_task].stack_base) {
             kfree((void*)tasks[current_task].stack_base);
             tasks[current_task].stack_base = 0;
+        }
+        if (tasks[current_task].addr_space >= 0) {
+            paging_free_task_directory(tasks[current_task].addr_space);
+            tasks[current_task].addr_space = -1;
         }
     }
 
@@ -196,6 +215,7 @@ int create_task(void (*entry)(), char* name) {
     tasks[i].esp = (uint32_t)stack;
     tasks[i].active = 1;
     tasks[i].name = name;
+    tasks[i].addr_space = -1; // Tâche ring0 pure : partage le répertoire noyau
     task_count++;
 
     return i;
@@ -206,10 +226,11 @@ int create_task(void (*entry)(), char* name) {
 // complète à 5 mots (SS, ESP, EFLAGS, CS, EIP) car le passage ring0->ring3
 // est un changement de niveau de privilège : le CPU exige que SS:ESP soient
 // également empilés pour savoir où basculer la pile utilisateur.
-// `user_stack_top` doit pointer vers le sommet d'une pile dédiée, mappée
-// avec le bit U/S (cf. kernel/paging.c) et distincte de la pile noyau ci-dessous
-// (qui elle ne sert qu'aux interruptions survenant pendant l'exécution ring3).
-int create_user_task(void (*entry)(), char* name, uint32_t user_stack_top) {
+// `user_stack_top`/`user_stack_size` décrivent la pile dédiée de la tâche
+// (mappée avec le bit U/S, cf. kernel/paging.c) : un espace d'adressage
+// isolé est créé pour que SEULE cette fenêtre soit accessible en ring3,
+// en plus du code/rodata/data partagé du noyau.
+int create_user_task(void (*entry)(), char* name, uint32_t user_stack_top, uint32_t user_stack_size) {
     if (task_count >= MAX_TASKS) return -1;
 
     int i;
@@ -220,6 +241,12 @@ int create_user_task(void (*entry)(), char* name, uint32_t user_stack_top) {
 
     uint32_t stack_address = (uint32_t)kmalloc(TASK_STACK_SIZE);
     if (stack_address == 0) return -1;
+
+    int space = paging_create_task_directory(user_stack_top - user_stack_size, user_stack_size);
+    if (space < 0) {
+        kfree((void*)stack_address);
+        return -1;
+    }
 
     uint32_t *stack = (uint32_t*)(stack_address + TASK_STACK_SIZE);
     tasks[i].stack_base = (uint32_t)stack - TASK_STACK_SIZE;
@@ -238,6 +265,7 @@ int create_user_task(void (*entry)(), char* name, uint32_t user_stack_top) {
     tasks[i].esp = (uint32_t)stack;
     tasks[i].active = 1;
     tasks[i].name = name;
+    tasks[i].addr_space = space;
     task_count++;
 
     return i;
@@ -248,6 +276,7 @@ void init_multitasking() {
         tasks[i].active = 0;
         tasks[i].sleeping = 0;
         tasks[i].wake_tick = 0;
+        tasks[i].addr_space = -1;
     }
 
     // Tâche 0 (Shell / Main) - l'état sera sauvegardé lors de la première interruption
@@ -257,4 +286,30 @@ void init_multitasking() {
     current_task = 0;
 
     multitasking_enabled = 1;
+}
+
+// Affiche la liste des tâches actives (commande shell "ps") : nom, état
+// (en cours / prête / en sommeil) et type d'espace d'adressage.
+void sched_dump_tasks(void) {
+    kprint("PID  NOM              ETAT       ESPACE\n");
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (!tasks[i].active) continue;
+        kprint_dec(i);
+        kprint("    ");
+        kprint(tasks[i].name ? tasks[i].name : "?");
+        kprint("            ");
+        if (i == current_task) {
+            kprint("en cours  ");
+        } else if (tasks[i].sleeping) {
+            kprint("sommeil   ");
+        } else {
+            kprint("prete     ");
+        }
+        if (tasks[i].addr_space >= 0) {
+            kprint("isole (ring3)");
+        } else {
+            kprint("noyau partage");
+        }
+        kprint("\n");
+    }
 }

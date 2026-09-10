@@ -11,6 +11,10 @@ unsigned int user_demo_stack_top(void) {
     return (unsigned int)user_demo_stack + sizeof(user_demo_stack);
 }
 
+unsigned int user_demo_stack_size(void) {
+    return sizeof(user_demo_stack);
+}
+
 // Petits enrobages appelant directement `int 0x80` : ce sont ces deux seules
 // instructions (mov + int) qui font toute l'interaction avec le noyau depuis
 // le ring3, exactement comme le ferait un vrai programme utilisateur.

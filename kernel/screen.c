@@ -6,6 +6,7 @@
 
 // Import des fonctions de cpu.c
 extern void outb(uint16_t port, uint8_t data);
+extern void serial_write_char(char c); // kernel/serial.c
 
 static int cursor_x = 0;
 static int cursor_y = 0;
@@ -56,6 +57,8 @@ void kprint_char_at(char c, int x, int y) {
 
 // Version standard utilisée par kprint et le shell
 void kprint_char(char c) {
+    serial_write_char(c); // Miroir vers COM1 pour les tests automatisés
+
     if (c == '\n') {
         cursor_x = 0;
         cursor_y++;

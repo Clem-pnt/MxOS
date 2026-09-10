@@ -127,6 +127,35 @@ void fs_create_file(char* name, uint32_t start_lba, uint32_t size_sect) {
     }
 }
 
+// Supprime l'entrée de répertoire correspondant à `name` (l'espace disque
+// occupé n'est PAS récupéré : l'allocateur "bump" next_free_lba ne gère pas
+// de liste de blocs libres, c'est une limitation connue). Persiste la table
+// racine mise à jour sur le disque. Renvoie 1 si le fichier a été supprimé.
+int fs_delete_file(char* name) {
+    if (!name || name[0] == 0) {
+        kprint("Nom de fichier invalide.\n");
+        return 0;
+    }
+    for (int i = 0; i < 15; i++) {
+        if (valid_name(root.files[i].name) && m_strcmp(root.files[i].name, name) == 0) {
+            for (int j = 0; j < 24; j++) root.files[i].name[j] = 0;
+            root.files[i].start_lba = 0;
+            root.files[i].size_sect = 0;
+
+            if (!ata_write_sector(FS_ROOT_LBA, (uint16_t*)&root)) {
+                kprint("Erreur d'ecriture disque.\n");
+                return 0;
+            }
+            kprint("Fichier supprime.\n");
+            return 1;
+        }
+    }
+    kprint("Fichier introuvable : ");
+    kprint(name);
+    kprint("\n");
+    return 0;
+}
+
 // Écrit réellement le contenu `data` (size_bytes octets) sur le disque, en
 // allouant l'espace via l'allocateur "bump" next_free_lba, puis enregistre
 // l'entrée correspondante. Retourne 1 en cas de succès, 0 sinon.

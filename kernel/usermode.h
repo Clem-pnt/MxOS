@@ -7,5 +7,6 @@ void user_task_demo(void);
 // Renvoie le sommet de la pile utilisateur dédiée à cette démo (à passer à
 // create_user_task()).
 unsigned int user_demo_stack_top(void);
+unsigned int user_demo_stack_size(void);
 
 #endif
