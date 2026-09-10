@@ -26,6 +26,44 @@ static void print_text_buffer(const uint8_t* data, uint32_t size) {
 }
 
 static RootDirectory root;
+// Bitmap des secteurs de la zone de données : 1 octet par secteur (0=libre,
+// 1=utilisé), indexée à partir de FS_DATA_LBA. Un octet par bit serait plus
+// compact, mais le secteur bitmap (512 octets) suffit largement pour
+// FS_DATA_SECTORS-1 entrées et le code reste plus simple/robuste ainsi.
+static uint8_t bitmap[512];
+
+static void bitmap_persist(void) {
+    ata_write_sector(FS_BITMAP_LBA, (uint16_t*)bitmap);
+}
+
+// Cherche `count` secteurs de données CONSECUTIFS libres dans la bitmap.
+// Renvoie le LBA de début, ou 0 si aucun espace suffisant n'est disponible.
+static uint32_t bitmap_find_free_run(uint32_t count) {
+    uint32_t run_start = 0;
+    uint32_t run_len = 0;
+
+    for (uint32_t i = 0; i < FS_DATA_SECTORS - 1; i++) {
+        if (bitmap[i] == 0) {
+            if (run_len == 0) run_start = i;
+            run_len++;
+            if (run_len >= count) {
+                return FS_DATA_LBA + run_start;
+            }
+        } else {
+            run_len = 0;
+        }
+    }
+    return 0;
+}
+
+static void bitmap_mark(uint32_t start_lba, uint32_t count, uint8_t used) {
+    if (start_lba < FS_DATA_LBA) return;
+    uint32_t idx = start_lba - FS_DATA_LBA;
+    for (uint32_t i = 0; i < count && idx + i < FS_DATA_SECTORS - 1; i++) {
+        bitmap[idx + i] = used;
+    }
+    bitmap_persist();
+}
 
 void fs_init() {
     if (!ata_read_sector(FS_ROOT_LBA, (uint16_t*)&root) ||
@@ -35,10 +73,11 @@ void fs_init() {
         }
         root.magic = FS_MAGIC;
         root.next_free_lba = FS_DATA_LBA;
-    }
-    // Protège contre une valeur corrompue lue depuis le disque
-    if (root.next_free_lba < FS_DATA_LBA || root.next_free_lba > FS_DATA_END_LBA) {
-        root.next_free_lba = FS_DATA_LBA;
+        for (uint32_t i = 0; i < sizeof(bitmap); i++) bitmap[i] = 0;
+        bitmap_persist();
+        ata_write_sector(FS_ROOT_LBA, (uint16_t*)&root);
+    } else if (!ata_read_sector(FS_BITMAP_LBA, (uint16_t*)bitmap)) {
+        for (uint32_t i = 0; i < sizeof(bitmap); i++) bitmap[i] = 0;
     }
 }
 
@@ -187,10 +226,11 @@ void fs_create_file(char* name, uint32_t start_lba, uint32_t size_sect) {
     }
 }
 
-// Supprime l'entrée de répertoire correspondant à `name` (l'espace disque
-// occupé n'est PAS récupéré : l'allocateur "bump" next_free_lba ne gère pas
-// de liste de blocs libres, c'est une limitation connue). Persiste la table
-// racine mise à jour sur le disque. Renvoie 1 si le fichier a été supprimé.
+// Supprime l'entrée de répertoire correspondant à `name` ET libère
+// réellement les secteurs qu'il occupait dans la bitmap (contrairement à
+// l'ancien allocateur "bump" qui ne récupérait jamais cet espace). Persiste
+// la table racine mise à jour sur le disque. Renvoie 1 si le fichier a été
+// supprimé.
 int fs_delete_file(char* name) {
     if (!name || name[0] == 0) {
         kprint("Nom de fichier invalide.\n");
@@ -198,6 +238,8 @@ int fs_delete_file(char* name) {
     }
     for (int i = 0; i < 15; i++) {
         if (valid_name(root.files[i].name) && m_strcmp(root.files[i].name, name) == 0) {
+            bitmap_mark(root.files[i].start_lba, root.files[i].size_sect, 0);
+
             for (int j = 0; j < 24; j++) root.files[i].name[j] = 0;
             root.files[i].start_lba = 0;
             root.files[i].size_sect = 0;
@@ -217,8 +259,10 @@ int fs_delete_file(char* name) {
 }
 
 // Écrit réellement le contenu `data` (size_bytes octets) sur le disque, en
-// allouant l'espace via l'allocateur "bump" next_free_lba, puis enregistre
-// l'entrée correspondante. Retourne 1 en cas de succès, 0 sinon.
+// allouant l'espace via la bitmap de blocs libres (bitmap_find_free_run),
+// ce qui permet de réutiliser l'espace libéré par un fs_delete_file
+// précédent, puis enregistre l'entrée correspondante. Retourne 1 en cas de
+// succès, 0 sinon.
 int fs_write_file(char* name, const uint8_t* data, uint32_t size_bytes) {
     if (!name || name[0] == 0 || !data || size_bytes == 0) {
         kprint("Parametres invalides.\n");
@@ -226,12 +270,12 @@ int fs_write_file(char* name, const uint8_t* data, uint32_t size_bytes) {
     }
 
     uint32_t size_sect = (size_bytes + 511) / 512;
-    if (root.next_free_lba + size_sect > FS_DATA_END_LBA) {
+    uint32_t start_lba = bitmap_find_free_run(size_sect);
+    if (start_lba == 0) {
         kprint("Espace disque insuffisant.\n");
         return 0;
     }
 
-    uint32_t start_lba = root.next_free_lba;
     uint32_t lba = start_lba;
     uint32_t remaining = size_bytes;
     uint8_t buffer[512];
@@ -250,8 +294,9 @@ int fs_write_file(char* name, const uint8_t* data, uint32_t size_bytes) {
         lba++;
     }
 
-    root.next_free_lba = start_lba + size_sect;
+    bitmap_mark(start_lba, size_sect, 1);
     if (!fs_add_entry(name, start_lba, size_sect)) {
+        bitmap_mark(start_lba, size_sect, 0); // annule l'allocation si l'entree ne peut pas etre enregistree
         return 0;
     }
     kprint("Fichier ecrit avec succes.\n");

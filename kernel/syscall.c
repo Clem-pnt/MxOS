@@ -27,6 +27,23 @@ static uint32_t syscall_dispatch(struct registers *regs) {
             return task_exit_and_reschedule(current_esp);
         case SYS_SLEEP:
             return task_sleep_and_reschedule(regs->ebx, current_esp);
+        case SYS_SEND:
+            // ebx = pid cible, ecx = pointeur message (mémoire de l'appelant), edx = longueur
+            regs->eax = (uint32_t)ipc_send((int)regs->ebx, (const void*)regs->ecx, regs->edx);
+            return current_esp;
+        case SYS_RECV: {
+            // ebx = tampon de sortie, ecx = pointeur uint32_t* longueur (optionnel),
+            // edx = pointeur int* PID expéditeur (optionnel) ; non bloquant.
+            uint32_t len = 0;
+            int sender = -1;
+            int got = ipc_recv((void*)regs->ebx, &len, &sender);
+            if (got) {
+                if (regs->ecx) *(uint32_t*)regs->ecx = len;
+                if (regs->edx) *(int*)regs->edx = sender;
+            }
+            regs->eax = (uint32_t)got;
+            return current_esp;
+        }
         default:
             return current_esp;
     }

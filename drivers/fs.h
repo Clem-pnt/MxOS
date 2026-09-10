@@ -10,16 +10,22 @@ typedef struct {
 } __attribute__((packed)) FileEntry;
 
 #define FS_ROOT_LBA 64
-#define FS_DATA_LBA 65
-// Réserve 512 secteurs (256 Ko) de zone de données après la table racine.
+// Secteur dédié à la bitmap d'allocation des blocs de données (1 octet par
+// secteur, 0 = libre / 1 = utilisé) : remplace l'ancien allocateur "bump"
+// (next_free_lba) qui ne récupérait jamais l'espace libéré par fs_delete_file.
+#define FS_BITMAP_LBA 65
+// Zone de données de fichiers proprement dite (après le secteur bitmap).
+#define FS_DATA_LBA 66
+// Réserve 512 secteurs (256 Ko, bitmap incluse) de zone de données après la
+// table racine ; la bitmap n'en décrit donc que FS_DATA_SECTORS-1.
 #define FS_DATA_SECTORS 512
-#define FS_DATA_END_LBA (FS_DATA_LBA + FS_DATA_SECTORS)
+#define FS_DATA_END_LBA (FS_BITMAP_LBA + FS_DATA_SECTORS)
 #define FS_MAGIC 0x3153464D
 
 typedef struct {
     uint32_t magic;
     FileEntry files[15];
-    uint32_t next_free_lba; // Allocateur "bump" pour les données de fichiers
+    uint32_t next_free_lba; // Obsolete (ancien allocateur bump), conserve pour compatibilite de mise en page sur disque, non utilise.
     uint8_t reserved[24];
 } __attribute__((packed)) RootDirectory;
 

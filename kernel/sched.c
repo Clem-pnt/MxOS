@@ -216,6 +216,9 @@ int create_task(void (*entry)(), char* name) {
     tasks[i].active = 1;
     tasks[i].name = name;
     tasks[i].addr_space = -1; // Tâche ring0 pure : partage le répertoire noyau
+    tasks[i].mailbox_has_msg = 0;
+    tasks[i].mailbox_len = 0;
+    tasks[i].mailbox_sender = -1;
     task_count++;
 
     return i;
@@ -277,6 +280,9 @@ int create_user_task_ex(void (*entry)(), char* name, uint32_t user_stack_top, ui
     tasks[i].active = 1;
     tasks[i].name = name;
     tasks[i].addr_space = space;
+    tasks[i].mailbox_has_msg = 0;
+    tasks[i].mailbox_len = 0;
+    tasks[i].mailbox_sender = -1;
     task_count++;
 
     return i;
@@ -288,6 +294,9 @@ void init_multitasking() {
         tasks[i].sleeping = 0;
         tasks[i].wake_tick = 0;
         tasks[i].addr_space = -1;
+        tasks[i].mailbox_has_msg = 0;
+        tasks[i].mailbox_len = 0;
+        tasks[i].mailbox_sender = -1;
     }
 
     // Tâche 0 (Shell / Main) - l'état sera sauvegardé lors de la première interruption
@@ -332,4 +341,50 @@ void sched_dump_tasks(void) {
 int task_is_active(int pid) {
     if (pid < 0 || pid >= MAX_TASKS) return 0;
     return tasks[pid].active;
+}
+
+// Renvoie le PID de la tâche actuellement élue (utilisé par ipc_send pour
+// savoir qui est l'expéditeur, et par le shell pour connaître son propre PID).
+int sched_current_pid(void) {
+    return current_task;
+}
+
+// Dépose un message dans la boîte aux lettres de `target_pid`. Une seule
+// case en attente à la fois (pas de file) : si le destinataire n'a pas
+// encore consommé son message précédent, l'appel échoue (renvoie 0) et
+// l'appelant est libre de réessayer plus tard.
+int ipc_send(int target_pid, const void* data, uint32_t len) {
+    if (target_pid < 0 || target_pid >= MAX_TASKS || !tasks[target_pid].active) return -1;
+    if (tasks[target_pid].mailbox_has_msg) return 0;
+
+    if (len > sizeof(tasks[target_pid].mailbox)) len = sizeof(tasks[target_pid].mailbox);
+
+    const uint8_t* src = (const uint8_t*)data;
+    for (uint32_t k = 0; k < len; k++) {
+        tasks[target_pid].mailbox[k] = src[k];
+    }
+    tasks[target_pid].mailbox_len = len;
+    tasks[target_pid].mailbox_sender = current_task;
+    tasks[target_pid].mailbox_has_msg = 1;
+    return 1;
+}
+
+// Retire le message en attente de la tâche courante (s'il y en a un).
+// Copie jusqu'à `sizeof(mailbox)` octets dans `out` ; renseigne la taille
+// réelle et le PID expéditeur si les pointeurs correspondants sont fournis.
+int ipc_recv(void* out, uint32_t* out_len, int* out_sender) {
+    Task* self = &tasks[current_task];
+    if (!self->mailbox_has_msg) return 0;
+
+    uint32_t len = self->mailbox_len;
+    uint8_t* dst = (uint8_t*)out;
+    for (uint32_t k = 0; k < len; k++) {
+        dst[k] = (uint8_t)self->mailbox[k];
+    }
+    if (out_len) *out_len = len;
+    if (out_sender) *out_sender = self->mailbox_sender;
+
+    self->mailbox_has_msg = 0;
+    self->mailbox_sender = -1;
+    return 1;
 }

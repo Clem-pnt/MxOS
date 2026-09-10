@@ -16,8 +16,9 @@ extern uint8_t __ro_end;
 uint32_t page_directory[1024] __attribute__((aligned(4096)));
 uint32_t first_page_table[1024] __attribute__((aligned(4096)));
 
-// Nombre maximal d'espaces d'adressage isolés (un par tâche ring3 vivante).
-#define MAX_ADDR_SPACES 4
+// Nombre maximal d'espaces d'adressage isolés (un par tâche ring3 vivante) :
+// MAX_EXEC_SLOTS (kernel/exec.c) + la tâche UserDemo compilée en dur + marge.
+#define MAX_ADDR_SPACES 6
 
 static uint32_t task_directories[MAX_ADDR_SPACES][1024] __attribute__((aligned(4096)));
 static uint32_t task_tables[MAX_ADDR_SPACES][1024] __attribute__((aligned(4096)));

@@ -4,22 +4,30 @@
 #include "../drivers/fs.h"
 #include <stdint.h>
 
-// Adresse fixe de chargement des programmes utilisateur externes (doit
-// correspondre à `. = 0x300000` dans userprogs/user.ld). Se trouve dans les
-// 4 Mo identity-mappés par kernel/paging.c, au-dela du tas noyau (1-2 Mo),
-// donc sans collision avec kmalloc/kfree.
-#define USER_PROG_BASE 0x300000
-#define USER_PROG_MAX_SIZE 0x20000 // 128 Ko
+// Adresses fixes de chargement des programmes utilisateur externes. Chaque
+// "slot" réserve une fenêtre de USER_PROG_MAX_SIZE octets, espacées de
+// SLOT_STRIDE pour éviter tout chevauchement ; tout tient dans les 4 Mo
+// identity-mappés par kernel/paging.c.
+// ATTENTION : userprogs/user.ld lie le binaire pour une exécution à
+// l'adresse SLOT_BASE(0) (0x300000). Charger ce même binaire à une autre
+// adresse (slots 1..3) ne fonctionne que parce que hello_user.c est un
+// programme trivial, sans adresse absolue vers ses propres données globales
+// (uniquement des appels relatifs). Un programme plus complexe nécessiterait
+// soit d'être toujours chargé au slot 0, soit un vrai chargeur avec
+// relocation. Limitation documentée dans le README.
+#define USER_PROG_MAX_SIZE 0x20000 // 128 Ko par slot
+#define SLOT_STRIDE         0x30000 // 192 Ko : marge au-dela de USER_PROG_MAX_SIZE
+#define SLOT_BASE(i)        (0x300000 + (uint32_t)(i) * SLOT_STRIDE)
+#define MAX_EXEC_SLOTS 4 // Doit rester <= MAX_ADDR_SPACES (kernel/paging.c)
 
-// Pile dédiée à la tâche exec'ée. Comme la zone de code ci-dessus, elle est
-// partagée par tous les `exec` : une seule tâche chargée par ce mécanisme
-// peut donc être active à la fois (cf. exec_active_pid ci-dessous).
-static uint8_t user_prog_stack[4096] __attribute__((aligned(16)));
+// Pile dédiée à chaque slot d'exécution (une par emplacement, pour permettre
+// plusieurs programmes chargés simultanément sans qu'ils partagent leur pile).
+static uint8_t exec_stacks[MAX_EXEC_SLOTS][4096] __attribute__((aligned(16)));
 
-// PID de la dernière tâche lancée par exec_run, ou -1. Sert de garde-fou :
-// tant qu'elle est encore active, on refuse un nouvel exec pour ne pas
-// écraser la zone de code/pile qu'elle utilise encore.
-static int exec_active_pid = -1;
+// PID de la tâche occupant chaque slot (-1 si jamais utilisé). Un slot est
+// considéré libre s'il vaut -1 OU si la tâche qu'il référence s'est terminée
+// entretemps (task_is_active() == 0) : l'espace est alors réutilisé.
+static int slot_pid[MAX_EXEC_SLOTS] = { -1, -1, -1, -1 };
 
 // Symboles générés par `objcopy -I binary` (cf. Makefile) à partir du
 // binaire compilé userprogs/hello_user.bin : bornes du blob embarqué dans
@@ -36,34 +44,49 @@ void exec_seed_programs(void) {
     fs_write_file("hello", _binary_hello_user_bin_start, size);
 }
 
+// Trouve un slot libre (jamais utilisé, ou dont la tâche précédente est
+// terminée). Renvoie l'index, ou -1 si les MAX_EXEC_SLOTS emplacements sont
+// tous occupés par une tâche encore active.
+static int find_free_slot(void) {
+    for (int i = 0; i < MAX_EXEC_SLOTS; i++) {
+        if (slot_pid[i] < 0 || !task_is_active(slot_pid[i])) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 int exec_run(char *name) {
-    if (exec_active_pid >= 0 && task_is_active(exec_active_pid)) {
-        kprint("Un programme charge par exec tourne deja (attendez sa fin).\n");
+    int slot = find_free_slot();
+    if (slot < 0) {
+        kprint("Trop de programmes charges simultanement (limite atteinte).\n");
         return -1;
     }
+
+    uint32_t base = SLOT_BASE(slot);
 
     // Efface entierement la zone de chargement : les eventuelles variables
     // non-initialisees (.bss) du programme ne sont pas presentes dans le
     // fichier sur disque (objcopy -O binary ne serialise pas le .bss), donc
     // doivent deja valoir zero en memoire avant l'execution.
     for (uint32_t i = 0; i < USER_PROG_MAX_SIZE; i++) {
-        ((uint8_t*)USER_PROG_BASE)[i] = 0;
+        ((uint8_t*)base)[i] = 0;
     }
 
     uint32_t size = 0;
-    if (!fs_load_file(name, (uint8_t*)USER_PROG_BASE, USER_PROG_MAX_SIZE, &size)) {
+    if (!fs_load_file(name, (uint8_t*)base, USER_PROG_MAX_SIZE, &size)) {
         return -1;
     }
 
-    uint32_t stack_top = (uint32_t)user_prog_stack + sizeof(user_prog_stack);
-    int pid = create_user_task_ex((void (*)())USER_PROG_BASE, name,
-                                   stack_top, sizeof(user_prog_stack),
-                                   USER_PROG_BASE, USER_PROG_MAX_SIZE);
+    uint32_t stack_top = (uint32_t)exec_stacks[slot] + sizeof(exec_stacks[slot]);
+    int pid = create_user_task_ex((void (*)())base, name,
+                                   stack_top, sizeof(exec_stacks[slot]),
+                                   base, USER_PROG_MAX_SIZE);
     if (pid < 0) {
         kprint("Impossible de creer la tache (limite atteinte).\n");
         return -1;
     }
 
-    exec_active_pid = pid;
+    slot_pid[slot] = pid;
     return pid;
 }

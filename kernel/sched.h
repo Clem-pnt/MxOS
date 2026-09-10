@@ -13,6 +13,13 @@ typedef struct {
     // Index de l'espace d'adressage isolé (cf. kernel/paging.c), ou -1 si
     // la tâche partage le répertoire de pages noyau (tâches ring0 pures).
     int addr_space;
+    // Boîte aux lettres IPC (une seule case en attente à la fois) : le
+    // noyau copie les données entre tâches, aucune n'accède jamais
+    // directement à la mémoire d'une autre (cf. ipc_send/ipc_recv).
+    char mailbox[128];
+    uint32_t mailbox_len;
+    int mailbox_has_msg;
+    int mailbox_sender;
 } Task;
 
 /* --- PROTOTYPES --- */
@@ -29,5 +36,16 @@ uint32_t task_exit_and_reschedule(uint32_t current_esp); // Appelable depuis un 
 uint32_t task_sleep_and_reschedule(uint32_t ms, uint32_t current_esp); // Idem, pour SYS_SLEEP
 void sched_dump_tasks(void); // Utilisé par la commande shell "ps"
 int task_is_active(int pid); // Utilisé par exec.c pour éviter d'écraser un programme en cours
+int sched_current_pid(void); // PID de la tâche actuellement élue
+
+// IPC basique : dépose/retire un message dans la boîte aux lettres d'une
+// tâche. `data`/`out` pointent dans la mémoire de l'appelant (ring0 ou
+// ring3), toujours valides depuis le noyau car le code s'exécute en CPL 0.
+// ipc_send: renvoie 1 si envoyé, 0 si boîte du destinataire déjà pleine,
+// -1 si le PID cible est invalide/inactif.
+int ipc_send(int target_pid, const void* data, uint32_t len);
+// ipc_recv: renvoie 1 si un message a été récupéré (remplit *out_len et
+// *out_sender s'ils sont non NULL), 0 si la boîte de l'appelant est vide.
+int ipc_recv(void* out, uint32_t* out_len, int* out_sender);
 
 #endif

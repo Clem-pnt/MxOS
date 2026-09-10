@@ -26,11 +26,26 @@ static void sys_exit(void) {
     __asm__ volatile("int $0x80" : : "a"(SYS_EXIT));
 }
 
+// SYS_SEND : ebx=pid cible, ecx=pointeur message, edx=longueur.
+static void sys_send(int target_pid, const char *msg, uint32_t len) {
+    __asm__ volatile("int $0x80" : : "a"(SYS_SEND), "b"(target_pid), "c"(msg), "d"(len) : "memory");
+}
+
 // Tâche de démonstration : s'exécute entièrement en ring3 (CPL=3), ne peut
 // exécuter aucune instruction privilégiée (hlt, cli, in/out...), et ne
 // communique avec le noyau qu'au travers de l'interface syscall INT 0x80.
 void user_task_demo(void) {
     sys_print("\n[Ring3] Hello depuis l'espace utilisateur (via int 0x80) !\n");
+
+    // Démo IPC : envoie un message a la tache 0 (le Shell), qui le lira au
+    // prochain tour de sa boucle de commande (cf. shell_poll_ipc() dans
+    // kernel/shell.c). Illustre que deux taches isolees peuvent communiquer
+    // sans jamais partager de memoire : le noyau copie les octets pour elles.
+    const char *msg = "Salut depuis Ring3 via IPC !";
+    int len = 0;
+    while (msg[len]) len++;
+    sys_send(0, msg, (uint32_t)(len + 1));
+
     sys_exit();
 
     // Ne devrait jamais être atteint : sys_exit() ne revient pas ici.
