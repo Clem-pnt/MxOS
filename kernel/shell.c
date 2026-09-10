@@ -11,8 +11,14 @@
 static char input_buffer[256];
 static int buffer_idx = 0;
 
-// Historique de commandes (tampon circulaire) pour les flèches haut/bas.
+// Historique de commandes (tampon circulaire) pour les flèches haut/bas,
+// et persistance sur disque (cf. history_save/history_load_from_disk) sous
+// forme de simple texte (une commande par ligne, séparateur '\n') dans le
+// fichier HISTORY_FILE : survit donc aux redémarrages.
 #define HISTORY_SIZE 8
+#define HISTORY_FILE "history.dat"
+#define MOTD_FILE "motd"
+#define EXEC_MAX_ARGS 8
 static char history[HISTORY_SIZE][256];
 static int history_len[HISTORY_SIZE];
 static int history_count = 0; // Nombre total de commandes jamais enregistrées
@@ -20,8 +26,90 @@ static int history_nav = -1;  // -1 = pas en navigation ; 0 = commande la plus r
 static char saved_line[256];  // Ligne en cours de frappe, sauvegardée en entrant en navigation
 static int saved_line_len = 0;
 
+// Déclaration anticipée : history_push() est définie plus bas (utilisée
+// aussi par shell_execute()), mais history_load_from_disk() en a besoin ici.
+static void history_push(char *cmd, int len);
+
+// Sérialise l'historique actuellement en mémoire (les commandes les plus
+// récentes, jusqu'à HISTORY_SIZE) vers HISTORY_FILE, une commande par ligne.
+// Appelé après chaque commande (cf. shell_execute) : fs_delete_file_silent
+// + fs_write_file_silent ne produisent aucune sortie, pour ne pas polluer
+// le shell à chaque frappe de touche "Entrée".
+static void history_save(void) {
+    static char buf[HISTORY_SIZE * 256];
+    uint32_t len = 0;
+
+    int max_steps = history_count < HISTORY_SIZE ? history_count : HISTORY_SIZE;
+    for (int steps_back = max_steps - 1; steps_back >= 0; steps_back--) {
+        int slot = (history_count - 1 - steps_back + HISTORY_SIZE) % HISTORY_SIZE;
+        int l = history_len[slot];
+        for (int i = 0; i < l && len < sizeof(buf) - 1; i++) buf[len++] = history[slot][i];
+        if (len < sizeof(buf) - 1) buf[len++] = '\n';
+    }
+
+    if (len == 0) return;
+    fs_delete_file_silent(HISTORY_FILE);
+    fs_write_file_silent(HISTORY_FILE, (const uint8_t*)buf, len);
+}
+
+// Charge l'historique persisté par une session précédente (s'il existe) :
+// relit HISTORY_FILE et repousse chaque ligne dans le tampon circulaire, en
+// préservant l'ordre chronologique. Appelé une seule fois par shell_init().
+//
+// fs_load_file() renvoie une taille ARRONDIE au secteur de 512 octets (cf.
+// drivers/fs.c : size_sect * 512), pas la longueur réelle écrite : le reste
+// du dernier secteur est du padding à zéro (fs_write_file_impl le remplit
+// de zéros au-delà du contenu). Comme une commande shell ne contient jamais
+// d'octet nul, on tronque donc `size` au premier octet 0 rencontré pour ne
+// traiter que le contenu réellement écrit.
+static uint32_t trim_to_first_nul(uint8_t *buf, uint32_t size) {
+    for (uint32_t i = 0; i < size; i++) {
+        if (buf[i] == 0) return i;
+    }
+    return size;
+}
+
+static void history_load_from_disk(void) {
+    static uint8_t buf[HISTORY_SIZE * 256];
+    if (!fs_file_exists(HISTORY_FILE)) return;
+
+    uint32_t size = 0;
+    if (!fs_load_file(HISTORY_FILE, buf, sizeof(buf), &size)) return;
+    size = trim_to_first_nul(buf, size);
+
+    uint32_t start = 0;
+    for (uint32_t i = 0; i <= size; i++) {
+        if (i == size || buf[i] == '\n') {
+            if (i > start) history_push((char*)&buf[start], (int)(i - start));
+            start = i + 1;
+        }
+    }
+}
+
+// Affiche le "message du jour" persisté dans MOTD_FILE s'il existe (créé
+// simplement via `write motd <texte>`, la commande générique existante) :
+// démontre que la persistance de configuration n'a besoin d'aucun format
+// spécial, juste du système de fichiers déjà en place.
+static void shell_show_motd(void) {
+    static uint8_t buf[512];
+    if (!fs_file_exists(MOTD_FILE)) return;
+
+    uint32_t size = 0;
+    if (!fs_load_file(MOTD_FILE, buf, sizeof(buf), &size)) return;
+    size = trim_to_first_nul(buf, size);
+
+    kprint("\n--- ");
+    kprint(MOTD_FILE);
+    kprint(" ---\n");
+    for (uint32_t i = 0; i < size; i++) kprint_char((char)buf[i]);
+    kprint("\n");
+}
+
 void shell_init() {
-    kprint("\nMxOS Shell v1.0\nTapez 'help' pour la liste des commandes.\n> ");
+    kprint("\nMxOS Shell v1.0\nTapez 'help' pour la liste des commandes.\n");
+    history_load_from_disk();
+    shell_show_motd();
+    kprint("> ");
     buffer_idx = 0;
 }
 
@@ -116,11 +204,12 @@ void shell_execute() {
 
     if (buffer_idx > 0) {
         history_push(input_buffer, buffer_idx);
+        history_save();
     }
     history_nav = -1;
 
     if (m_strcmp(input_buffer, "help") == 0) {
-        kprint("Commandes : help, clear, ver, ls, cat <file>, write <file> <contenu>,\nrm <file>, exec <file>, ps, mem, uptime, reboot");
+        kprint("Commandes : help, clear, ver, ls, cat <file>, write <file> <contenu>,\nrm <file>, exec <file> [args...], ps, mem, uptime, reboot");
     } 
     else if (m_strcmp(input_buffer, "clear") == 0) {
         clear_screen();
@@ -138,7 +227,28 @@ void shell_execute() {
         fs_delete_file(input_buffer + 3);
     }
     else if (m_strncmp(input_buffer, "exec ", 5) == 0) {
-        exec_run(input_buffer + 5);
+        // Découpe "exec <fichier> [arg1] [arg2] ..." en un tableau argv[]
+        // (argv[0] = nom du fichier, comme la convention argc/argv usuelle),
+        // en remplaçant les espaces par des zéros directement dans
+        // input_buffer (même technique que la commande "write" ci-dessous).
+        char *argv[EXEC_MAX_ARGS];
+        int argc = 0;
+        char *p = input_buffer + 5;
+        while (*p == ' ') p++;
+        while (*p && argc < EXEC_MAX_ARGS) {
+            argv[argc++] = p;
+            while (*p && *p != ' ') p++;
+            if (*p == ' ') {
+                *p = '\0';
+                p++;
+                while (*p == ' ') p++;
+            }
+        }
+        if (argc == 0) {
+            kprint("Usage : exec <fichier> [arguments...]");
+        } else {
+            exec_run(argv[0], argc, argv);
+        }
     }
     else if (m_strcmp(input_buffer, "ps") == 0) {
         sched_dump_tasks();

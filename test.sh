@@ -114,6 +114,53 @@ LOG3="$(mktemp /tmp/mxos_test3_XXXXXX.log)"
         -serial file:"$LOG3" \
         -monitor stdio >/dev/null 2>&1
 
+echo "== MxOS : boot séparé pour le test exec avec arguments (argv) =="
+LOG4="$(mktemp /tmp/mxos_test4_XXXXXX.log)"
+(
+    sleep 3
+    send_keys e x e c spc h e l l o spc a l p h a spc b e t a
+    echo "sendkey ret"; sleep 1.0
+    echo "quit"
+) | timeout "$TIMEOUT" qemu-system-i386 \
+        -drive format=raw,file="$IMG" \
+        -display none -no-reboot \
+        -serial file:"$LOG4" \
+        -monitor stdio >/dev/null 2>&1
+
+echo "== MxOS : boot séparé (écriture) pour le test de persistance (MOTD + historique) =="
+LOG5="$(mktemp /tmp/mxos_test5_XXXXXX.log)"
+(
+    sleep 3
+    send_keys w r i t e spc m o t d spc b i e n v e n u e s u r spc m x o s
+    echo "sendkey ret"; sleep 0.5
+    send_keys p s
+    echo "sendkey ret"; sleep 0.4
+    echo "quit"
+) | timeout "$TIMEOUT" qemu-system-i386 \
+        -drive format=raw,file="$IMG" \
+        -display none -no-reboot \
+        -serial file:"$LOG5" \
+        -monitor stdio >/dev/null 2>&1
+rm -f "$LOG5"
+
+echo "== MxOS : boot séparé (relecture) pour le test de persistance (MOTD + historique) =="
+# Nouveau boot QEMU sur la MÊME image disque (mxos_image.img persiste entre
+# les invocations de QEMU au sein de ce script) : sans rien taper avant, on
+# vérifie que le MOTD écrit au boot précédent s'affiche automatiquement, et
+# qu'une flèche haut rappelle bien "ps" (dernière commande de la session
+# précédente, rechargée depuis history.dat par history_load_from_disk()).
+LOG6="$(mktemp /tmp/mxos_test6_XXXXXX.log)"
+(
+    sleep 3
+    echo "sendkey up"; sleep 0.3
+    echo "sendkey ret"; sleep 0.5
+    echo "quit"
+) | timeout "$TIMEOUT" qemu-system-i386 \
+        -drive format=raw,file="$IMG" \
+        -display none -no-reboot \
+        -serial file:"$LOG6" \
+        -monitor stdio >/dev/null 2>&1
+
 echo "== MxOS : vérification des marqueurs attendus =="
 
 check() {
@@ -189,6 +236,33 @@ else
     FAILED=1
 fi
 rm -f "$LOG3"
+
+echo "== MxOS : vérification exec avec arguments (quatrième boot) =="
+check4() {
+    local desc="$1" pattern="$2"
+    if grep -qF -- "$pattern" "$LOG4"; then
+        echo "  OK   - $desc"
+    else
+        echo "  FAIL - $desc (motif introuvable: '$pattern')"
+        FAILED=1
+    fi
+}
+check4 "exec transmet argc/argv au programme" "[UserProg] Arguments recus : hello alpha beta"
+rm -f "$LOG4"
+
+echo "== MxOS : vérification persistance MOTD + historique (boot de relecture) =="
+check6() {
+    local desc="$1" pattern="$2"
+    if grep -qF -- "$pattern" "$LOG6"; then
+        echo "  OK   - $desc"
+    else
+        echo "  FAIL - $desc (motif introuvable: '$pattern')"
+        FAILED=1
+    fi
+}
+check6 "MOTD affiché automatiquement au boot" "bienvenuesur mxos"
+check6 "historique : 'ps' rappelé (flèche haut) réexécuté après reboot" "PID  NOM              ETAT       ESPACE"
+rm -f "$LOG6"
 
 if [ "$FAILED" -eq 0 ]; then
     echo "== SUCCES : tous les tests sont passés =="

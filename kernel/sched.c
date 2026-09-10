@@ -244,6 +244,17 @@ int create_user_task(void (*entry)(), char* name, uint32_t user_stack_top, uint3
 // équivaut à create_user_task (code déjà compilé dans l'image du noyau).
 int create_user_task_ex(void (*entry)(), char* name, uint32_t user_stack_top, uint32_t user_stack_size,
                          uint32_t code_base, uint32_t code_size) {
+    return create_user_task_argv(entry, name, user_stack_top, user_stack_size, code_base, code_size, 0, 0);
+}
+
+// Variante complète : identique à create_user_task_ex, mais permet en plus
+// de préinitialiser EBX/ECX au tout premier "popal" ring3 (avant le tout
+// premier octet exécuté par `entry`), utilisée par kernel/exec.c pour
+// transmettre argc (EBX) / argv (ECX, pointeur vers un tableau de pointeurs
+// dans la fenêtre de pile de CETTE tâche) à un programme chargé par `exec`.
+int create_user_task_argv(void (*entry)(), char* name, uint32_t user_stack_top, uint32_t user_stack_size,
+                           uint32_t code_base, uint32_t code_size,
+                           uint32_t init_ebx, uint32_t init_ecx) {
     if (task_count >= MAX_TASKS) return -1;
 
     int i;
@@ -273,8 +284,24 @@ int create_user_task_ex(void (*entry)(), char* name, uint32_t user_stack_top, ui
     *(--stack) = SEL_USER_CODE;      // CS ring3
     *(--stack) = (uint32_t)entry;    // EIP
 
-    // Simulation du pushal initial
-    for (int j = 0; j < 8; j++) *(--stack) = 0;
+    // Simulation du pushal initial. IMPORTANT : "*(--stack) = X" écrit
+    // aux adresses DÉCROISSANTES à chaque ligne, donc la DERNIÈRE ligne
+    // écrite se retrouve à l'adresse la plus basse (= tasks[i].esp final,
+    // = ce que popal lira EN PREMIER, càd EDI). Il faut donc écrire dans
+    // l'ordre INVERSE de "edi,esi,ebp,esp_dummy,ebx,edx,ecx,eax" (l'ordre
+    // de lecture de popal), soit "eax,ecx,edx,ebx,esp_dummy,ebp,esi,edi"
+    // (l'ordre d'écriture par pushal lui-même). Une version précédente de
+    // ce code avait l'ordre inversé par erreur : EBX/ECX recevaient alors
+    // les valeurs destinées à ESP_dummy/ESI (tous deux 0 jusqu'ici, d'où
+    // un bug invisible tant que argc/argv valaient 0).
+    *(--stack) = 0;         // eax
+    *(--stack) = init_ecx;  // ecx (argv pour un programme lancé par exec)
+    *(--stack) = 0;         // edx
+    *(--stack) = init_ebx;  // ebx (argc pour un programme lancé par exec)
+    *(--stack) = 0;         // esp_dummy
+    *(--stack) = 0;         // ebp
+    *(--stack) = 0;         // esi
+    *(--stack) = 0;         // edi
 
     tasks[i].esp = (uint32_t)stack;
     tasks[i].active = 1;
@@ -287,6 +314,7 @@ int create_user_task_ex(void (*entry)(), char* name, uint32_t user_stack_top, ui
 
     return i;
 }
+
 
 void init_multitasking() {
     for (int i = 0; i < MAX_TASKS; i++) {

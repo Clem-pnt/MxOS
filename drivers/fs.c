@@ -231,9 +231,16 @@ void fs_create_file(char* name, uint32_t start_lba, uint32_t size_sect) {
 // l'ancien allocateur "bump" qui ne récupérait jamais cet espace). Persiste
 // la table racine mise à jour sur le disque. Renvoie 1 si le fichier a été
 // supprimé.
-int fs_delete_file(char* name) {
+// Supprime l'entrée de répertoire correspondant à `name` ET libère
+// réellement les secteurs qu'il occupait dans la bitmap (contrairement à
+// l'ancien allocateur "bump" qui ne récupérait jamais cet espace). Persiste
+// la table racine mise à jour sur le disque. Renvoie 1 si le fichier a été
+// supprimé. `verbose` contrôle l'affichage des messages de statut/erreur :
+// utilisé à 0 par fs_delete_file_silent() pour la persistance de config
+// (kernel/shell.c), qui ne doit pas polluer la sortie shell à chaque commande.
+static int fs_delete_file_impl(char* name, int verbose) {
     if (!name || name[0] == 0) {
-        kprint("Nom de fichier invalide.\n");
+        if (verbose) kprint("Nom de fichier invalide.\n");
         return 0;
     }
     for (int i = 0; i < 15; i++) {
@@ -245,17 +252,27 @@ int fs_delete_file(char* name) {
             root.files[i].size_sect = 0;
 
             if (!ata_write_sector(FS_ROOT_LBA, (uint16_t*)&root)) {
-                kprint("Erreur d'ecriture disque.\n");
+                if (verbose) kprint("Erreur d'ecriture disque.\n");
                 return 0;
             }
-            kprint("Fichier supprime.\n");
+            if (verbose) kprint("Fichier supprime.\n");
             return 1;
         }
     }
-    kprint("Fichier introuvable : ");
-    kprint(name);
-    kprint("\n");
+    if (verbose) {
+        kprint("Fichier introuvable : ");
+        kprint(name);
+        kprint("\n");
+    }
     return 0;
+}
+
+int fs_delete_file(char* name) {
+    return fs_delete_file_impl(name, 1);
+}
+
+int fs_delete_file_silent(char* name) {
+    return fs_delete_file_impl(name, 0);
 }
 
 // Écrit réellement le contenu `data` (size_bytes octets) sur le disque, en
@@ -263,16 +280,36 @@ int fs_delete_file(char* name) {
 // ce qui permet de réutiliser l'espace libéré par un fs_delete_file
 // précédent, puis enregistre l'entrée correspondante. Retourne 1 en cas de
 // succès, 0 sinon.
-int fs_write_file(char* name, const uint8_t* data, uint32_t size_bytes) {
+// Écrit réellement le contenu `data` (size_bytes octets) sur le disque, en
+// allouant l'espace via la bitmap de blocs libres (bitmap_find_free_run),
+// ce qui permet de réutiliser l'espace libéré par un fs_delete_file
+// précédent, puis enregistre l'entrée correspondante. Retourne 1 en cas de
+// succès, 0 sinon. `verbose` contrôle l'affichage des messages (cf.
+// fs_delete_file_impl : fs_write_file_silent() l'utilise à 0 pour la
+// persistance de config/historique, kernel/shell.c).
+static int fs_write_file_impl(char* name, const uint8_t* data, uint32_t size_bytes, int verbose) {
     if (!name || name[0] == 0 || !data || size_bytes == 0) {
-        kprint("Parametres invalides.\n");
+        if (verbose) kprint("Parametres invalides.\n");
         return 0;
+    }
+
+    // Si un fichier du même nom existe déjà, on le supprime d'abord : sans
+    // cela, fs_add_entry() ajouterait une DEUXIÈME entrée dans la table
+    // racine (elle ne cherche qu'un slot libre, sans vérifier les doublons),
+    // et toute lecture ultérieure (fs_load_file/fs_read_file/...) continuerait
+    // à trouver l'ANCIENNE entrée en premier (boucle i=0..14). C'est
+    // indispensable pour la persistance de config/historique : history.dat
+    // est réécrit après chaque commande, donc sans ce nettoyage la table
+    // racine (15 entrées max) se remplirait en quelques commandes et
+    // resterait bloquée sur le tout premier contenu enregistré.
+    if (fs_file_exists(name)) {
+        fs_delete_file_impl(name, 0);
     }
 
     uint32_t size_sect = (size_bytes + 511) / 512;
     uint32_t start_lba = bitmap_find_free_run(size_sect);
     if (start_lba == 0) {
-        kprint("Espace disque insuffisant.\n");
+        if (verbose) kprint("Espace disque insuffisant.\n");
         return 0;
     }
 
@@ -286,7 +323,7 @@ int fs_write_file(char* name, const uint8_t* data, uint32_t size_bytes) {
             buffer[i] = (i < chunk) ? data[i] : 0;
         }
         if (!ata_write_sector(lba, (uint16_t*)buffer)) {
-            kprint("Erreur d'ecriture disque.\n");
+            if (verbose) kprint("Erreur d'ecriture disque.\n");
             return 0;
         }
         data += chunk;
@@ -299,6 +336,14 @@ int fs_write_file(char* name, const uint8_t* data, uint32_t size_bytes) {
         bitmap_mark(start_lba, size_sect, 0); // annule l'allocation si l'entree ne peut pas etre enregistree
         return 0;
     }
-    kprint("Fichier ecrit avec succes.\n");
+    if (verbose) kprint("Fichier ecrit avec succes.\n");
     return 1;
+}
+
+int fs_write_file(char* name, const uint8_t* data, uint32_t size_bytes) {
+    return fs_write_file_impl(name, data, size_bytes, 1);
+}
+
+int fs_write_file_silent(char* name, const uint8_t* data, uint32_t size_bytes) {
+    return fs_write_file_impl(name, data, size_bytes, 0);
 }

@@ -28,6 +28,9 @@ int create_task(void (*entry)(), char* name);
 int create_user_task(void (*entry)(), char* name, uint32_t user_stack_top, uint32_t user_stack_size);
 int create_user_task_ex(void (*entry)(), char* name, uint32_t user_stack_top, uint32_t user_stack_size,
                          uint32_t code_base, uint32_t code_size);
+int create_user_task_argv(void (*entry)(), char* name, uint32_t user_stack_top, uint32_t user_stack_size,
+                           uint32_t code_base, uint32_t code_size,
+                           uint32_t init_ebx, uint32_t init_ecx);
 uint32_t schedule(uint32_t last_esp);
 void timer_handler(); // Le handler naked
 void task_sleep(uint32_t ms);

@@ -14,7 +14,7 @@ KERNEL_OBJECTS := kernel.o \
 	kernel/init.o kernel/cpu.o kernel/interrupts.o kernel/mem.o \
 	kernel/screen.o kernel/sched.o kernel/shell.o kernel/keyboard.o \
 	kernel/paging.o kernel/exceptions.o kernel/pit.o kernel/syscall.o \
-	kernel/gdt.o kernel/usermode.o kernel/serial.o kernel/exec.o \
+	kernel/gdt.o kernel/usermode.o kernel/serial.o kernel/exec.o kernel/elf.o \
 	userprogs/hello_user_blob.o \
 	drivers/ata.o drivers/fs.o
 
@@ -38,22 +38,24 @@ drivers/%.o: drivers/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # --- Programme utilisateur de démonstration (chargé par `exec`, cf. kernel/exec.c) ---
-# Compilé/lié séparément du noyau, à l'adresse fixe 0x300000 (userprogs/user.ld),
-# puis converti en binaire plat, puis réembarqué comme blob de données dans
-# l'image du noyau (symboles _binary_hello_user_bin_start/_end générés par
-# objcopy -I binary), afin qu'exec_seed_programs() puisse l'écrire sur le
-# disque virtuel au premier boot.
+# Compilé/lié séparément du noyau en un vrai exécutable ELF32 i386, lié pour
+# l'adresse 0x300000 (userprogs/user.ld) mais avec `--emit-relocs` : le
+# fichier final GARDE ses relocations (R_386_32/R_386_PC32) au lieu de les
+# "consommer" comme le ferait un exécutable normal, ce qui permet à
+# kernel/elf.c de le RELOGER (charger correctement à une autre adresse,
+# cf. les 4 emplacements concurrents de kernel/exec.c). Le fichier .elf
+# complet (pas un binaire plat) est ensuite réembarqué comme blob de données
+# dans l'image du noyau (symboles _binary_hello_user_elf_start/_end générés
+# par objcopy -I binary), afin qu'exec_seed_programs() puisse l'écrire sur
+# le disque virtuel au premier boot.
 userprogs/hello_user.o: userprogs/hello_user.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-userprogs/hello_user.tmp: userprogs/hello_user.o userprogs/user.ld
-	$(LD) -m elf_i386 -T userprogs/user.ld -o $@ userprogs/hello_user.o
+userprogs/hello_user.elf: userprogs/hello_user.o userprogs/user.ld
+	$(LD) -m elf_i386 -T userprogs/user.ld --emit-relocs -o $@ userprogs/hello_user.o
 
-userprogs/hello_user.bin: userprogs/hello_user.tmp
-	$(OBJCOPY) -S -O binary $< $@
-
-userprogs/hello_user_blob.o: userprogs/hello_user.bin
-	cd userprogs && $(OBJCOPY) -I binary -O elf32-i386 -B i386 hello_user.bin hello_user_blob.o
+userprogs/hello_user_blob.o: userprogs/hello_user.elf
+	cd userprogs && $(OBJCOPY) -I binary -O elf32-i386 -B i386 hello_user.elf hello_user_blob.o
 
 kernel.tmp: $(KERNEL_OBJECTS) linker.ld
 	$(LD) $(LDFLAGS) -o $@ $(KERNEL_OBJECTS)
@@ -80,5 +82,5 @@ run: mxos_image.img
 
 clean:
 	rm -f $(KERNEL_OBJECTS) boot.bin kernel.tmp kernel.bin root.bin data.bin mxos_image.img \
-		userprogs/hello_user.o userprogs/hello_user.tmp userprogs/hello_user.bin userprogs/hello_user_blob.o
+		userprogs/hello_user.o userprogs/hello_user.elf userprogs/hello_user_blob.o
 

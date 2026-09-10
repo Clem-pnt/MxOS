@@ -20,16 +20,31 @@ par répertoire de pages.
 - **GDT/TSS et ring3** (`kernel/gdt.c`, `kernel/usermode.c`) : segments
   noyau/utilisateur, TSS pour les transitions ring3→ring0, tâche de
   démonstration s'exécutant entièrement en ring3 via `int 0x80`.
-- **Chargeur de programmes utilisateur** (`kernel/exec.c`, `userprogs/`) :
-  format binaire plat compilé/lié séparément, chargé depuis le système de
-  fichiers par la commande `exec <fichier>` et exécuté dans son propre
-  espace d'adressage isolé. Plusieurs programmes peuvent tourner
-  **simultanément** : jusqu'à `MAX_EXEC_SLOTS` (4) emplacements de
-  chargement (`0x300000`, `0x330000`, `0x360000`, `0x390000`, chacun avec
-  sa propre pile), réattribués dès qu'une tâche se termine. Un programme
-  de démonstration (`userprogs/hello_user.c`) est embarqué dans l'image du
-  noyau et écrit automatiquement sur le disque virtuel au premier boot
-  (sous le nom `hello`), pour qu'`exec hello` fonctionne dès le départ.
+- **Chargeur ELF relogeant** (`kernel/exec.c`, `kernel/elf.c`, `userprogs/`) :
+  les programmes utilisateur sont compilés/liés séparément en de véritables
+  fichiers ELF32 (`ld --emit-relocs`, qui conserve les sections de
+  relocation `SHT_REL` normalement supprimées d'un exécutable final),
+  chargés depuis le système de fichiers par la commande
+  `exec <fichier> [args...]` et exécutés dans leur propre espace
+  d'adressage isolé. `kernel/elf.c` place les segments `PT_LOAD`, met à
+  zéro le `.bss`, puis applique un décalage uniforme (`load_base -
+  link_base`) à chaque relocation `R_386_32` (adresses absolues) : le
+  **même** fichier ELF peut donc être chargé correctement à n'importe
+  lequel des `MAX_EXEC_SLOTS` (4) emplacements (`0x300000`, `0x330000`,
+  `0x360000`, `0x390000`, chacun avec sa propre pile), réattribués dès
+  qu'une tâche se termine — ce n'est plus une coïncidence liée à la
+  simplicité du programme de démo. Un programme de démonstration
+  (`userprogs/hello_user.c`) est embarqué dans l'image du noyau et écrit
+  automatiquement sur le disque virtuel au premier boot (sous le nom
+  `hello`), pour qu'`exec hello` fonctionne dès le départ.
+- **Arguments de programme (argc/argv)** : `exec <fichier> arg1 arg2 ...`
+  transmet les arguments au programme lancé. Convention "maison" (pas de
+  vrai ABI, projet éducatif) : `create_user_task_argv()` (`kernel/sched.c`)
+  précharge EBX=argc/ECX=argv dans la pile simulée avant le tout premier
+  `iret` de la tâche ; le programme les lit via un idiome GCC (opérandes de
+  sortie sur un `asm volatile` vide) en tout premier dans `user_main()`.
+  Les chaînes/tableau de pointeurs argv sont construits dans une petite
+  zone réservée au bas de la pile de la tâche (accessible en ring3).
 - **Ordonnanceur préemptif** (`kernel/sched.c`) : tâches noyau et
   utilisateur, sommeil (`task_sleep`), sortie propre, bascule de CR3.
 - **Syscalls** (`kernel/syscall.c`) : `SYS_PRINT`, `SYS_EXIT`, `SYS_SLEEP`,
@@ -46,9 +61,18 @@ par répertoire de pages.
   l'espace libéré par `rm` est réellement récupéré et réutilisable par les
   écritures suivantes (contrairement à l'ancien "bump allocator").
 - **Shell** (`kernel/shell.c`) : `help`, `clear`, `ver`, `ls`, `cat`, `write`,
-  `rm`, `exec`, `ps`, `mem`, `uptime`, `reboot`. Historique de commandes
-  (flèches haut/bas, 8 dernières commandes) et prise en charge de la touche
-  Shift (majuscules/symboles) via `kernel/keyboard.c`.
+  `rm`, `exec <fichier> [args...]`, `ps`, `mem`, `uptime`, `reboot`.
+  Historique de commandes (flèches haut/bas, 8 dernières commandes) et prise
+  en charge de la touche Shift (majuscules/symboles) via
+  `kernel/keyboard.c`.
+- **Persistance de configuration** : l'historique de commandes est
+  automatiquement sauvegardé (`history.dat`, un secteur par écriture, texte
+  brut une commande par ligne) après chaque commande et rechargé au boot
+  suivant — la navigation flèche haut fonctionne donc dès le démarrage même
+  sans rien avoir tapé dans la session courante. Un message du jour (MOTD)
+  peut être défini simplement via `write motd <texte>` (commande générique
+  déjà existante, aucun code spécial nécessaire) et s'affiche automatiquement
+  au boot s'il existe.
 - **Sortie série (COM1)** (`kernel/serial.c`) : miroir de tout l'affichage
   écran, utilisé pour les tests automatisés sans capture d'écran.
 
@@ -68,23 +92,19 @@ Sous Windows : `compile.bat` (équivalent utilisant `powershell`/`ld` PE).
 ./test.sh
 ```
 
-Construit le projet puis démarre l'image dans QEMU en headless sur **trois
+Construit le projet puis démarre l'image dans QEMU en headless sur **six
 lancements distincts** (pour limiter les risques de dérive de synchronisation
-clavier sur de longues séquences), injecte des commandes shell via le
-moniteur QEMU, capture la sortie sur le port série, puis vérifie par
-recherche de motifs que le boot, l'espace utilisateur ring3, l'IPC,
-l'allocateur bitmap, l'exec concurrent et le clavier (Shift + historique)
+clavier sur de longues séquences, et pour tester la persistance entre deux
+redémarrages), injecte des commandes shell via le moniteur QEMU, capture la
+sortie sur le port série, puis vérifie par recherche de motifs que le boot,
+l'espace utilisateur ring3, l'IPC, l'allocateur bitmap, l'exec concurrent, le
+chargeur ELF relogeant avec argv, le clavier (Shift + historique) et la
+persistance de configuration (historique + MOTD entre deux boots)
 fonctionnent correctement. Code de sortie non nul en cas d'échec (logs
 conservés dans `/tmp/mxos_test*_failed.log`).
 
 ## Limitations connues
 
-- Les emplacements `exec` (1 à 3) chargent le même binaire lié pour
-  l'adresse `0x300000` (slot 0) : cela ne fonctionne correctement que parce
-  que `hello_user.c` est trivial et ne contient aucune référence absolue à
-  ses propres données (uniquement des appels relatifs). Un programme plus
-  complexe devrait soit toujours tourner sur le slot 0, soit passer par un
-  vrai chargeur relogeant les adresses (non implémenté ici).
 - L'IPC ne gère qu'un message en attente par tâche (pas de file) et n'est
   pas bloquant : `ipc_recv` renvoie immédiatement si la boîte est vide.
 - Jusqu'à 6 espaces d'adressage isolés simultanés (`MAX_ADDR_SPACES` dans
@@ -93,4 +113,8 @@ conservés dans `/tmp/mxos_test*_failed.log`).
 - La touche Shift ne modifie que les lettres (majuscules) ; les chiffres et
   symboles restent non « shiftés » par simplicité.
 - L'historique de commandes conserve les 8 dernières commandes (tampon
-  circulaire), sans persistance entre redémarrages.
+  circulaire), persistées sur disque (`history.dat`).
+- La zone argv réservée au bas de la pile de chaque tâche `exec` fait 512
+  octets ; un programme utilisant plus de ~3,5 Ko de pile risquerait
+  d'écraser ses propres arguments (limitation acceptée pour ce projet
+  éducatif).

@@ -1,7 +1,9 @@
-/* Script de link pour les programmes utilisateur "flat binary".
- * Doit rester cohérent avec USER_PROG_BASE défini dans kernel/exec.c :
- * l'adresse de chargement 0x300000 est fixe (pas de chargeur relogeable),
- * exactement comme le noyau lui-même est fixé à 0x8000 par linker.ld. */
+/* Script de link pour les programmes utilisateur ELF32 relogeables.
+ * L'adresse 0x300000 (LINK_BASE dans kernel/exec.c) est l'adresse de LIEN
+ * (link-time), pas nécessairement l'adresse de CHARGEMENT : grâce à
+ * `ld --emit-relocs` (cf. Makefile) et au chargeur kernel/elf.c, ce même
+ * binaire peut être chargé et relogé à une autre adresse (les autres
+ * emplacements `exec` concurrents). */
 ENTRY(user_main)
 SECTIONS
 {
