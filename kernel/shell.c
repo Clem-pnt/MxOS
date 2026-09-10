@@ -5,6 +5,7 @@
 #include "pit.h"
 #include "cpu.h"
 #include "sched.h"
+#include "exec.h"
 #include "../drivers/fs.h"
 
 static char input_buffer[256];
@@ -42,7 +43,7 @@ void shell_execute() {
     input_buffer[buffer_idx] = '\0'; // Termine la chaîne
 
     if (m_strcmp(input_buffer, "help") == 0) {
-        kprint("Commandes : help, clear, ver, ls, cat <file>, write <file> <contenu>,\nrm <file>, ps, mem, uptime, reboot");
+        kprint("Commandes : help, clear, ver, ls, cat <file>, write <file> <contenu>,\nrm <file>, exec <file>, ps, mem, uptime, reboot");
     } 
     else if (m_strcmp(input_buffer, "clear") == 0) {
         clear_screen();
@@ -58,6 +59,9 @@ void shell_execute() {
     }
     else if (m_strncmp(input_buffer, "rm ", 3) == 0) {
         fs_delete_file(input_buffer + 3);
+    }
+    else if (m_strncmp(input_buffer, "exec ", 5) == 0) {
+        exec_run(input_buffer + 5);
     }
     else if (m_strcmp(input_buffer, "ps") == 0) {
         sched_dump_tasks();

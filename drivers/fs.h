@@ -26,6 +26,8 @@ typedef struct {
 void fs_init();
 void fs_list();
 void fs_read_file(char* name);
+int fs_file_exists(char* name);
+int fs_load_file(char* name, uint8_t* dest, uint32_t max_size, uint32_t *out_size);
 void fs_create_file(char* name, uint32_t start_lba, uint32_t size_sect);
 int fs_delete_file(char* name);
 int fs_write_file(char* name, const uint8_t* data, uint32_t size_bytes);

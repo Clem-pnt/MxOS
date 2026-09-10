@@ -231,6 +231,16 @@ int create_task(void (*entry)(), char* name) {
 // isolé est créé pour que SEULE cette fenêtre soit accessible en ring3,
 // en plus du code/rodata/data partagé du noyau.
 int create_user_task(void (*entry)(), char* name, uint32_t user_stack_top, uint32_t user_stack_size) {
+    return create_user_task_ex(entry, name, user_stack_top, user_stack_size, 0, 0);
+}
+
+// Variante acceptant en plus une fenêtre de code utilisateur externe
+// (`code_base`/`code_size`) : utilisée par le chargeur `exec` (kernel/exec.c)
+// pour un programme chargé depuis le disque, dont le code ne fait PAS
+// partie de la zone code/rodata/data partagée du noyau. Passer code_size=0
+// équivaut à create_user_task (code déjà compilé dans l'image du noyau).
+int create_user_task_ex(void (*entry)(), char* name, uint32_t user_stack_top, uint32_t user_stack_size,
+                         uint32_t code_base, uint32_t code_size) {
     if (task_count >= MAX_TASKS) return -1;
 
     int i;
@@ -242,7 +252,8 @@ int create_user_task(void (*entry)(), char* name, uint32_t user_stack_top, uint3
     uint32_t stack_address = (uint32_t)kmalloc(TASK_STACK_SIZE);
     if (stack_address == 0) return -1;
 
-    int space = paging_create_task_directory(user_stack_top - user_stack_size, user_stack_size);
+    int space = paging_create_task_directory_ex(code_base, code_size,
+                                                 user_stack_top - user_stack_size, user_stack_size);
     if (space < 0) {
         kfree((void*)stack_address);
         return -1;
@@ -312,4 +323,13 @@ void sched_dump_tasks(void) {
         }
         kprint("\n");
     }
+}
+
+// Renvoie 1 si le PID donné correspond encore à une tâche active. Utilisé
+// par exec.c pour refuser de lancer un nouveau programme tant que la zone
+// de chargement fixe (partagée par tous les exec) est encore utilisée par
+// une tâche en cours.
+int task_is_active(int pid) {
+    if (pid < 0 || pid >= MAX_TASKS) return 0;
+    return tasks[pid].active;
 }

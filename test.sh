@@ -53,6 +53,8 @@ send_keys() {
     send_keys r m spc t e s t f i l e
     echo "sendkey ret"; sleep 0.4
     send_keys l s
+    echo "sendkey ret"; sleep 0.4
+    send_keys e x e c spc h e l l o
     echo "sendkey ret"; sleep 0.8
     echo "quit"
 ) | timeout "$TIMEOUT" qemu-system-i386 \
@@ -82,6 +84,8 @@ check "commande write"                      "Fichier ecrit avec succes"
 check "commande ls liste le fichier créé"   "- testfile"
 check "commande cat lit le contenu"         "hello"
 check "commande rm supprime le fichier"     "Fichier supprime"
+check "programme 'hello' seme sur le disque" "- hello"
+check "exec charge et lance le programme"   "[UserProg] Hello depuis un programme charge du disque"
 
 if [ "$FAILED" -eq 0 ]; then
     echo "== SUCCES : tous les tests sont passés =="

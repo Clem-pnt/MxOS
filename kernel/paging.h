@@ -14,6 +14,8 @@ uint32_t paging_kernel_directory_phys(void);
 // (>=0) à passer à paging_task_directory_phys()/paging_free_task_directory(),
 // ou -1 si la limite MAX_ADDR_SPACES est atteinte.
 int paging_create_task_directory(uint32_t user_stack_base, uint32_t user_stack_size);
+int paging_create_task_directory_ex(uint32_t code_base, uint32_t code_size,
+                                     uint32_t user_stack_base, uint32_t user_stack_size);
 uint32_t paging_task_directory_phys(int idx);
 void paging_free_task_directory(int idx);
 

@@ -9,6 +9,7 @@
 #include "kernel/gdt.h"
 #include "kernel/usermode.h"
 #include "kernel/serial.h"
+#include "kernel/exec.h"
 #include "../drivers/fs.h"
 #include "mem.h"  
 #include "shell.h"
@@ -41,6 +42,7 @@ void main_entry() {
     pit_init(100);
 
     fs_init();
+    exec_seed_programs();
     shell_init();
 
     kprint("Enabling paging...\n");

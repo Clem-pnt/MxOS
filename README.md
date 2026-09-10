@@ -20,6 +20,13 @@ par répertoire de pages.
 - **GDT/TSS et ring3** (`kernel/gdt.c`, `kernel/usermode.c`) : segments
   noyau/utilisateur, TSS pour les transitions ring3→ring0, tâche de
   démonstration s'exécutant entièrement en ring3 via `int 0x80`.
+- **Chargeur de programmes utilisateur** (`kernel/exec.c`, `userprogs/`) :
+  format binaire plat compilé/lié séparément (adresse fixe `0x300000`),
+  chargé depuis le système de fichiers par la commande `exec <fichier>` et
+  exécuté dans son propre espace d'adressage isolé. Un programme de
+  démonstration (`userprogs/hello_user.c`) est embarqué dans l'image du
+  noyau et écrit automatiquement sur le disque virtuel au premier boot
+  (sous le nom `hello`), pour qu'`exec hello` fonctionne dès le départ.
 - **Ordonnanceur préemptif** (`kernel/sched.c`) : tâches noyau et
   utilisateur, sommeil (`task_sleep`), sortie propre, bascule de CR3.
 - **Syscalls** (`kernel/syscall.c`) : `SYS_PRINT`, `SYS_EXIT`, `SYS_SLEEP` via
@@ -27,7 +34,7 @@ par répertoire de pages.
 - **Système de fichiers** (`drivers/fs.c`) sur disque ATA PIO
   (`drivers/ata.c`) : `ls`, `cat`, `write`, `rm`, table racine persistée.
 - **Shell** (`kernel/shell.c`) : `help`, `clear`, `ver`, `ls`, `cat`, `write`,
-  `rm`, `ps`, `mem`, `uptime`, `reboot`.
+  `rm`, `exec`, `ps`, `mem`, `uptime`, `reboot`.
 - **Sortie série (COM1)** (`kernel/serial.c`) : miroir de tout l'affichage
   écran, utilisé pour les tests automatisés sans capture d'écran.
 
@@ -56,10 +63,12 @@ correctement. Code de sortie non nul en cas d'échec (log conservé dans
 
 ## Limitations connues
 
-- Pas de vrai chargeur de binaires utilisateur : les tâches ring3
-  actuelles sont des fonctions C compilées dans l'image du noyau.
+- Un seul programme chargé par `exec` à la fois : la zone de chargement
+  (`0x300000`, 128 Ko) et sa pile dédiée sont des buffers statiques partagés
+  par tous les `exec` successifs (un nouvel `exec` est refusé tant que le
+  précédent programme est encore actif).
 - L'allocateur de blocs disque (`fs.c`) est un simple "bump allocator" :
   l'espace libéré par `rm` n'est pas récupéré.
-- Une seule tâche à la fois peut se trouver en ring3 avec son propre
-  répertoire de pages actif (jusqu'à 4 espaces d'adressage isolés
-  simultanés, cf. `MAX_ADDR_SPACES` dans `kernel/paging.c`).
+- Jusqu'à 4 espaces d'adressage isolés simultanés (`MAX_ADDR_SPACES` dans
+  `kernel/paging.c`), tous types de tâches ring3 confondus (démo compilée
+  ou programmes chargés par `exec`).

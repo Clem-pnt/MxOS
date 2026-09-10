@@ -24,10 +24,13 @@ static uint32_t task_tables[MAX_ADDR_SPACES][1024] __attribute__((aligned(4096))
 static int task_dir_used[MAX_ADDR_SPACES];
 
 // Remplit une table de pages en identity-map sur 4 Mo. `user_start`/`user_end`
-// (si différents) délimitent une fenêtre supplémentaire marquée U/S=1 : c'est
-// la pile utilisateur propre à UNE tâche donnée. En dehors de cette fenêtre
-// et de la zone code/rodata/data partagée, tout reste Supervisor-only.
-static void fill_identity_table(uint32_t *table, uint32_t user_start, uint32_t user_end) {
+// délimitent la fenêtre de pile utilisateur, et `code_start`/`code_end` une
+// fenêtre supplémentaire optionnelle (programme chargé depuis le disque par
+// `exec`, cf. kernel/exec.c) ; toutes deux marquées U/S=1. En dehors de ces
+// fenêtres et de la zone code/rodata/data partagée du noyau, tout reste
+// Supervisor-only.
+static void fill_identity_table(uint32_t *table, uint32_t user_start, uint32_t user_end,
+                                 uint32_t code_start, uint32_t code_end) {
     uint32_t ro_start = (uint32_t)&__text_start;
     uint32_t ro_stop  = (uint32_t)&__ro_end;
 
@@ -41,6 +44,9 @@ static void fill_identity_table(uint32_t *table, uint32_t user_start, uint32_t u
         if (user_start != user_end && phys + 4096 > user_start && phys < user_end) {
             flags = 7; // Present, R/W, User (pile utilisateur de cette tache)
         }
+        if (code_start != code_end && phys + 4096 > code_start && phys < code_end) {
+            flags = 7; // Present, R/W, User (code utilisateur charge depuis le disque)
+        }
 
         table[i] = phys | flags;
     }
@@ -52,7 +58,7 @@ void paging_init() {
         page_directory[i] = 0x00000002; // Read/Write, Not Present
     }
 
-    fill_identity_table(first_page_table, 0, 0);
+    fill_identity_table(first_page_table, 0, 0, 0, 0);
 
     // Bit U/S (0x4) mis sur la PDE : indispensable pour que les PTE
     // individuelles marquées "User" soient réellement accessibles en ring3
@@ -83,12 +89,24 @@ uint32_t paging_kernel_directory_phys(void) {
 // Supervisor-only dans CET espace d'adressage : une tâche ring3 qui tente d'y
 // accéder déclenche un #PF (actuellement fatal, cf. kernel/exceptions.c).
 int paging_create_task_directory(uint32_t user_stack_base, uint32_t user_stack_size) {
+    return paging_create_task_directory_ex(0, 0, user_stack_base, user_stack_size);
+}
+
+// Variante acceptant en plus une fenêtre de code utilisateur (programme
+// chargé depuis le disque par `exec`, cf. kernel/exec.c) distincte de la
+// zone code/rodata/data partagée du noyau. Passer code_size=0 équivaut à
+// paging_create_task_directory (tâche dont le code est déjà dans la zone
+// partagée, ex: UserDemo compilée dans l'image du noyau).
+int paging_create_task_directory_ex(uint32_t code_base, uint32_t code_size,
+                                     uint32_t user_stack_base, uint32_t user_stack_size) {
     for (int i = 0; i < MAX_ADDR_SPACES; i++) {
         if (task_dir_used[i]) continue;
 
         task_dir_used[i] = 1;
         for (int j = 0; j < 1024; j++) task_directories[i][j] = 0x00000002;
-        fill_identity_table(task_tables[i], user_stack_base, user_stack_base + user_stack_size);
+        fill_identity_table(task_tables[i],
+                             user_stack_base, user_stack_base + user_stack_size,
+                             code_base, code_base + code_size);
         task_directories[i][0] = ((uint32_t)task_tables[i]) | 7;
         return i;
     }

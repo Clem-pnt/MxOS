@@ -93,6 +93,66 @@ void fs_read_file(char* name) {
     kprint("\n");
 }
 
+int fs_file_exists(char* name) {
+    if (!name || name[0] == 0) return 0;
+    for (int i = 0; i < 15; i++) {
+        if (valid_name(root.files[i].name) && m_strcmp(root.files[i].name, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Charge le contenu brut d'un fichier dans `dest` (jusqu'à `max_size` octets),
+// utilisé par le chargeur `exec` (kernel/exec.c) pour amener un programme
+// utilisateur en mémoire avant de créer sa tâche ring3. Contrairement à
+// fs_read_file (qui filtre/affiche du texte), copie les octets tels quels :
+// le fichier est traité comme un binaire plat exécutable.
+int fs_load_file(char* name, uint8_t* dest, uint32_t max_size, uint32_t *out_size) {
+    if (!name || name[0] == 0 || !dest) {
+        kprint("Parametres invalides.\n");
+        return 0;
+    }
+    for (int i = 0; i < 15; i++) {
+        if (valid_name(root.files[i].name) && m_strcmp(root.files[i].name, name) == 0) {
+            uint32_t total_bytes = root.files[i].size_sect * 512;
+            uint32_t lba = root.files[i].start_lba;
+
+            if (lba < FS_DATA_LBA ||
+                root.files[i].size_sect == 0 ||
+                root.files[i].size_sect > 0x100000 ||
+                lba > 0xFFFFFFFFu - root.files[i].size_sect) {
+                kprint("Metadonnees de fichier invalides.\n");
+                return 0;
+            }
+            if (total_bytes > max_size) {
+                kprint("Programme trop volumineux pour la zone de chargement.\n");
+                return 0;
+            }
+
+            uint32_t remaining = total_bytes;
+            uint8_t *out = dest;
+            uint8_t buffer[512];
+            while (remaining > 0) {
+                if (!ata_read_sector(lba++, (uint16_t*)buffer)) {
+                    kprint("Erreur de lecture disque.\n");
+                    return 0;
+                }
+                uint32_t chunk = remaining > 512 ? 512 : remaining;
+                for (uint32_t k = 0; k < chunk; k++) out[k] = buffer[k];
+                out += chunk;
+                remaining -= chunk;
+            }
+            if (out_size) *out_size = total_bytes;
+            return 1;
+        }
+    }
+    kprint("Fichier introuvable : ");
+    kprint(name);
+    kprint("\n");
+    return 0;
+}
+
 // Enregistre une entrée de répertoire (nom + emplacement) puis persiste la
 // table racine sur le disque. Utilisé par fs_create_file et fs_write_file.
 static int fs_add_entry(char* name, uint32_t start_lba, uint32_t size_sect) {
