@@ -161,6 +161,35 @@ LOG6="$(mktemp /tmp/mxos_test6_XXXXXX.log)"
         -serial file:"$LOG6" \
         -monitor stdio >/dev/null 2>&1
 
+echo "== MxOS : boot séparé (Phase 8 : echo/IPC, kill, priority) =="
+# Boot dédié, isolé des autres (comme LOG2/LOG3), pour les nouvelles
+# fonctionnalités : programme "echo" (mini-libc + argv + IPC), commande
+# "kill <pid>" et commande "priority <pid> <niveau>".
+LOG7="$(mktemp /tmp/mxos_test7_XXXXXX.log)"
+(
+    sleep 3
+    # exec echo avec arguments : vérifie mini-libc + argv + envoi IPC.
+    # NOTE : "echo" termine (print + IPC + exit) avant qu'on puisse le "ps"/
+    # "kill" (tâche trop courte pour survivre jusqu'à la commande suivante) :
+    # on vérifie donc juste que "kill" sur un PID déjà inactif renvoie bien
+    # le message d'erreur attendu (chemin d'erreur de task_kill), et que
+    # "priority" ne plante pas sur une tâche réellement active (Clock=1).
+    send_keys e x e c spc e c h o spc f o o spc b a r
+    echo "sendkey ret"; sleep 0.6
+    send_keys k i l l spc 3
+    echo "sendkey ret"; sleep 0.4
+    send_keys p s
+    echo "sendkey ret"; sleep 0.4
+    # priority : ne doit pas planter / doit renvoyer un message de confirmation.
+    send_keys p r i o r i t y spc 1 spc 0
+    echo "sendkey ret"; sleep 0.4
+    echo "quit"
+) | timeout "$TIMEOUT" qemu-system-i386 \
+        -drive format=raw,file="$IMG" \
+        -display none -no-reboot \
+        -serial file:"$LOG7" \
+        -monitor stdio >/dev/null 2>&1
+
 echo "== MxOS : vérification des marqueurs attendus =="
 
 check() {
@@ -263,6 +292,24 @@ check6() {
 check6 "MOTD affiché automatiquement au boot" "bienvenuesur mxos"
 check6 "historique : 'ps' rappelé (flèche haut) réexécuté après reboot" "PID  NOM              ETAT       ESPACE"
 rm -f "$LOG6"
+
+echo "== MxOS : vérification Phase 8 (echo/IPC, kill, priority) =="
+check7() {
+    local desc="$1" pattern="$2"
+    if grep -qF -- "$pattern" "$LOG7"; then
+        echo "  OK   - $desc"
+    else
+        echo "  FAIL - $desc (motif introuvable: '$pattern')"
+        FAILED=1
+    fi
+}
+check7 "programme 'echo' seme sur le disque + exec" "[echo] echo foo bar"
+check7 "echo : message IPC recu par le shell" "[IPC] Message de la tache"
+check7 "echo : contenu du message IPC correct" "echo foo bar"
+check7 "kill : PID invalide/inactif correctement rejete" "Impossible de terminer cette tache"
+check7 "ps : tache Clock toujours presente (kill n'a pas tout casse)" "Clock"
+check7 "priority : commande acceptee sans planter" "Priorite mise a jour"
+rm -f "$LOG7"
 
 if [ "$FAILED" -eq 0 ]; then
     echo "== SUCCES : tous les tests sont passés =="

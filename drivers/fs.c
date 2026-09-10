@@ -26,6 +26,43 @@ static void print_text_buffer(const uint8_t* data, uint32_t size) {
 }
 
 static RootDirectory root;
+// Nombre de secteurs de 512 octets nécessaires pour stocker RootDirectory
+// en entier (avec FS_MAX_FILES entrées) : le répertoire racine ne tient
+// plus forcément dans un seul secteur comme à l'origine (15 entrées max).
+#define FS_ROOT_SECTORS ((sizeof(RootDirectory) + 511) / 512)
+
+// Charge RootDirectory depuis le disque (FS_ROOT_SECTORS secteurs
+// consécutifs à partir de FS_ROOT_LBA) dans `root`. Renvoie 1 si toutes les
+// lectures ont réussi, 0 sinon (auquel cas le contenu de `root` ne doit pas
+// être considéré fiable).
+static int fs_root_load(void) {
+    uint8_t *raw = (uint8_t*)&root;
+    uint8_t sector_buf[512];
+    for (uint32_t s = 0; s < FS_ROOT_SECTORS; s++) {
+        if (!ata_read_sector(FS_ROOT_LBA + s, (uint16_t*)sector_buf)) return 0;
+        uint32_t offset = s * 512;
+        uint32_t remaining = (uint32_t)sizeof(RootDirectory) - offset;
+        uint32_t chunk = remaining > 512 ? 512 : remaining;
+        for (uint32_t i = 0; i < chunk; i++) raw[offset + i] = sector_buf[i];
+    }
+    return 1;
+}
+
+// Persiste `root` sur le disque (FS_ROOT_SECTORS secteurs consécutifs à
+// partir de FS_ROOT_LBA). Renvoie 1 si toutes les écritures ont réussi.
+static int fs_root_save(void) {
+    uint8_t *raw = (uint8_t*)&root;
+    uint8_t sector_buf[512];
+    for (uint32_t s = 0; s < FS_ROOT_SECTORS; s++) {
+        uint32_t offset = s * 512;
+        uint32_t remaining = (uint32_t)sizeof(RootDirectory) - offset;
+        uint32_t chunk = remaining > 512 ? 512 : remaining;
+        for (uint32_t i = 0; i < 512; i++) sector_buf[i] = (i < chunk) ? raw[offset + i] : 0;
+        if (!ata_write_sector(FS_ROOT_LBA + s, (uint16_t*)sector_buf)) return 0;
+    }
+    return 1;
+}
+
 // Bitmap des secteurs de la zone de données : 1 octet par secteur (0=libre,
 // 1=utilisé), indexée à partir de FS_DATA_LBA. Un octet par bit serait plus
 // compact, mais le secteur bitmap (512 octets) suffit largement pour
@@ -66,7 +103,7 @@ static void bitmap_mark(uint32_t start_lba, uint32_t count, uint8_t used) {
 }
 
 void fs_init() {
-    if (!ata_read_sector(FS_ROOT_LBA, (uint16_t*)&root) ||
+    if (!fs_root_load() ||
         root.magic != FS_MAGIC) {
         for (uint32_t i = 0; i < sizeof(root); i++) {
             ((uint8_t*)&root)[i] = 0;
@@ -75,7 +112,7 @@ void fs_init() {
         root.next_free_lba = FS_DATA_LBA;
         for (uint32_t i = 0; i < sizeof(bitmap); i++) bitmap[i] = 0;
         bitmap_persist();
-        ata_write_sector(FS_ROOT_LBA, (uint16_t*)&root);
+        fs_root_save();
     } else if (!ata_read_sector(FS_BITMAP_LBA, (uint16_t*)bitmap)) {
         for (uint32_t i = 0; i < sizeof(bitmap); i++) bitmap[i] = 0;
     }
@@ -83,7 +120,7 @@ void fs_init() {
 
 void fs_list() {
     kprint("Fichiers sur MxOS :\n");
-    for(int i = 0; i < 15; i++) {
+    for(int i = 0; i < FS_MAX_FILES; i++) {
         if (valid_name(root.files[i].name)) {
             kprint("- ");
             kprint(root.files[i].name);
@@ -98,7 +135,7 @@ void fs_read_file(char* name) {
         kprint("Nom de fichier invalide.\n");
         return;
     }
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < FS_MAX_FILES; i++) {
         if (valid_name(root.files[i].name) && m_strcmp(root.files[i].name, name) == 0) {
             kprint("Lecture de : ");
             kprint(name);
@@ -134,7 +171,7 @@ void fs_read_file(char* name) {
 
 int fs_file_exists(char* name) {
     if (!name || name[0] == 0) return 0;
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < FS_MAX_FILES; i++) {
         if (valid_name(root.files[i].name) && m_strcmp(root.files[i].name, name) == 0) {
             return 1;
         }
@@ -152,7 +189,7 @@ int fs_load_file(char* name, uint8_t* dest, uint32_t max_size, uint32_t *out_siz
         kprint("Parametres invalides.\n");
         return 0;
     }
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < FS_MAX_FILES; i++) {
         if (valid_name(root.files[i].name) && m_strcmp(root.files[i].name, name) == 0) {
             uint32_t total_bytes = root.files[i].size_sect * 512;
             uint32_t lba = root.files[i].start_lba;
@@ -195,7 +232,7 @@ int fs_load_file(char* name, uint8_t* dest, uint32_t max_size, uint32_t *out_siz
 // Enregistre une entrée de répertoire (nom + emplacement) puis persiste la
 // table racine sur le disque. Utilisé par fs_create_file et fs_write_file.
 static int fs_add_entry(char* name, uint32_t start_lba, uint32_t size_sect) {
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < FS_MAX_FILES; i++) {
         if (root.files[i].name[0] == 0) {
             for (int j = 0; j < 23; j++) {
                 root.files[i].name[j] = name[j];
@@ -205,7 +242,7 @@ static int fs_add_entry(char* name, uint32_t start_lba, uint32_t size_sect) {
             root.files[i].start_lba = start_lba;
             root.files[i].size_sect = size_sect;
 
-            if (!ata_write_sector(FS_ROOT_LBA, (uint16_t*)&root)) {
+            if (!fs_root_save()) {
                 kprint("Erreur d'ecriture disque.\n");
                 return 0;
             }
@@ -243,7 +280,7 @@ static int fs_delete_file_impl(char* name, int verbose) {
         if (verbose) kprint("Nom de fichier invalide.\n");
         return 0;
     }
-    for (int i = 0; i < 15; i++) {
+    for (int i = 0; i < FS_MAX_FILES; i++) {
         if (valid_name(root.files[i].name) && m_strcmp(root.files[i].name, name) == 0) {
             bitmap_mark(root.files[i].start_lba, root.files[i].size_sect, 0);
 
@@ -251,7 +288,7 @@ static int fs_delete_file_impl(char* name, int verbose) {
             root.files[i].start_lba = 0;
             root.files[i].size_sect = 0;
 
-            if (!ata_write_sector(FS_ROOT_LBA, (uint16_t*)&root)) {
+            if (!fs_root_save()) {
                 if (verbose) kprint("Erreur d'ecriture disque.\n");
                 return 0;
             }

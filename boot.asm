@@ -1,6 +1,6 @@
 [org 0x7c00]
 KERNEL_OFFSET equ 0x8000
-KERNEL_SECTORS equ 63
+KERNEL_SECTORS equ 80
 
 xor ax, ax
 mov ds, ax
@@ -57,6 +57,18 @@ load_kernel:
     jc .failed
 
     add bx, 512
+    jnc .no_segment_bump
+    ; BX (offset 16 bits) vient de déborder au-delà de 0xFFFF : on avance
+    ; ES de 0x1000 (soit 0x1000*16 = 0x10000 en adresse physique) pour
+    ; compenser exactement ce débordement et continuer à charger le noyau
+    ; de façon linéaire en mémoire au-delà de la limite de 64 Ko d'un seul
+    ; segment réel-mode. Sans cela, BX boucle silencieusement sur lui-même
+    ; après KERNEL_OFFSET+64 Ko (~63 secteurs à partir de 0x8000), et les
+    ; secteurs suivants du noyau écrasent le début du noyau déjà chargé.
+    mov ax, es
+    add ax, 0x1000
+    mov es, ax
+.no_segment_bump:
     inc cl
     cmp cl, [SECTORS_PER_TRACK]
     jbe .continue

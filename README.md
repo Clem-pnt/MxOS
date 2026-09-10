@@ -8,8 +8,11 @@ par répertoire de pages.
 
 ## Fonctionnalités
 
-- **Bootloader** (`boot.asm`) : charge le noyau depuis le disque (63 secteurs
-  max) et bascule en mode protégé 32 bits.
+- **Bootloader** (`boot.asm`) : charge le noyau depuis le disque (80 secteurs,
+  `KERNEL_SECTORS`) et bascule en mode protégé 32 bits. La boucle de lecture
+  gère correctement le dépassement 16 bits de `BX` (adressage réel
+  segment:offset) au-delà de 64 Ko chargés en avançant `ES` de `0x1000` — un
+  vrai bug latent découvert et corrigé en Phase 8 (voir "Bugs corrigés").
 - **Interruptions & exceptions** (`kernel/interrupts.c`, `kernel/exceptions.c`) :
   IDT complète, gestionnaire dédié pour chacune des 32 exceptions CPU.
 - **Pagination avec isolation par tâche** (`kernel/paging.c`) : chaque tâche
@@ -49,22 +52,34 @@ par répertoire de pages.
   utilisateur, sommeil (`task_sleep`), sortie propre, bascule de CR3.
 - **Syscalls** (`kernel/syscall.c`) : `SYS_PRINT`, `SYS_EXIT`, `SYS_SLEEP`,
   `SYS_SEND`/`SYS_RECV` (IPC) via `int 0x80`.
-- **IPC basique par boîte aux lettres** (`ipc_send`/`ipc_recv` dans
-  `kernel/sched.c`) : chaque tâche dispose d'une case mailbox (1 message en
-  attente maximum) ; le noyau copie les octets entre l'expéditeur et le
+- **IPC basique par boîtes aux lettres avec file FIFO** (`ipc_send`/`ipc_recv`
+  dans `kernel/sched.c`) : chaque tâche dispose d'une file circulaire de
+  `MAILBOX_QUEUE_SIZE` (4) messages en attente (auparavant un seul message
+  possible) ; le noyau copie les octets entre l'expéditeur et le
   destinataire, aucune tâche n'accède jamais directement à la mémoire d'une
-  autre. Démo : la tâche ring3 `UserDemo` envoie un message au shell (PID 0),
-  qui l'affiche via `shell_poll_ipc()`.
+  autre. Démo : la tâche ring3 `UserDemo` et le programme `echo` envoient un
+  message au shell (PID 0), qui l'affiche via `shell_poll_ipc()`.
 - **Système de fichiers** (`drivers/fs.c`) sur disque ATA PIO
-  (`drivers/ata.c`) : `ls`, `cat`, `write`, `rm`, table racine persistée.
-  Allocation par **bitmap** (1 octet/secteur, secteur dédié `FS_BITMAP_LBA`) :
-  l'espace libéré par `rm` est réellement récupéré et réutilisable par les
-  écritures suivantes (contrairement à l'ancien "bump allocator").
+  (`drivers/ata.c`, avec relecture/retry automatique sur erreur E/S) :
+  `ls`, `cat`, `write`, `rm`, table racine persistée sur plusieurs secteurs
+  (`FS_ROOT_SECTORS`), capacité de `FS_MAX_FILES` = 32 fichiers (auparavant
+  15, limité à un seul secteur de répertoire). Allocation par **bitmap**
+  (1 octet/secteur, secteur dédié `FS_BITMAP_LBA`) : l'espace libéré par `rm`
+  est réellement récupéré et réutilisable par les écritures suivantes
+  (contrairement à l'ancien "bump allocator").
 - **Shell** (`kernel/shell.c`) : `help`, `clear`, `ver`, `ls`, `cat`, `write`,
-  `rm`, `exec <fichier> [args...]`, `ps`, `mem`, `uptime`, `reboot`.
+  `rm`, `exec <fichier> [args...]`, `ps`, `kill <pid>`,
+  `priority <pid> <niveau>`, `mem`, `uptime`, `reboot`.
   Historique de commandes (flèches haut/bas, 8 dernières commandes) et prise
   en charge de la touche Shift (majuscules/symboles) via
   `kernel/keyboard.c`.
+- **Mini-libc pour l'espace utilisateur** (`userprogs/libc.h`/`libc.c`) :
+  wrappers `sys_print`/`sys_exit`/`sys_sleep`/`sys_send`/`sys_recv` autour de
+  `int 0x80`, helpers `u_strlen`/`u_strcmp`/`u_strcpy`, et la macro
+  `MXOS_READ_ARGV(argc, argv)`. Deux programmes utilisateur l'utilisent :
+  `hello_user.c` (démo) et `echo_user.c` (recompose argv et l'envoie en IPC
+  au shell), tous deux embarqués dans l'image du noyau et semés
+  automatiquement sur le disque virtuel (`hello`, `echo`) au premier boot.
 - **Persistance de configuration** : l'historique de commandes est
   automatiquement sauvegardé (`history.dat`, un secteur par écriture, texte
   brut une commande par ligne) après chaque commande et rechargé au boot
@@ -92,26 +107,51 @@ Sous Windows : `compile.bat` (équivalent utilisant `powershell`/`ld` PE).
 ./test.sh
 ```
 
-Construit le projet puis démarre l'image dans QEMU en headless sur **six
+Construit le projet puis démarre l'image dans QEMU en headless sur **sept
 lancements distincts** (pour limiter les risques de dérive de synchronisation
 clavier sur de longues séquences, et pour tester la persistance entre deux
 redémarrages), injecte des commandes shell via le moniteur QEMU, capture la
 sortie sur le port série, puis vérifie par recherche de motifs que le boot,
 l'espace utilisateur ring3, l'IPC, l'allocateur bitmap, l'exec concurrent, le
-chargeur ELF relogeant avec argv, le clavier (Shift + historique) et la
-persistance de configuration (historique + MOTD entre deux boots)
-fonctionnent correctement. Code de sortie non nul en cas d'échec (logs
-conservés dans `/tmp/mxos_test*_failed.log`).
+chargeur ELF relogeant avec argv, le clavier (Shift + historique), la
+persistance de configuration (historique + MOTD entre deux boots), et enfin
+le second programme utilisateur (`echo`, mini-libc + IPC), la commande
+`kill` et la commande `priority` fonctionnent correctement. Code de sortie
+non nul en cas d'échec (logs conservés dans `/tmp/mxos_test*_failed.log`).
+
+## Bugs corrigés (Phase 8)
+
+Deux bugs sérieux, préexistants et indépendants des nouvelles
+fonctionnalités, ont été découverts et corrigés pendant le développement de
+cette phase :
+
+- **Débordement de la file clavier** (`kernel/keyboard.c`) : `key_queue`
+  faisait 128 octets, mais les index de lecture/écriture (`queue_read`,
+  `queue_write`) étaient des `uint8_t` (0–255). Au-delà de 128 touches non
+  consommées (ex. rafale d'écritures disque), `queue_push()` écrivait hors
+  tableau et corrompait la mémoire statique adjacente (symptôme observé :
+  shell qui se corrompt puis reste bloqué en majuscules). Corrigé en
+  portant `key_queue` à 256 octets (bornes exactes de l'index `uint8_t`).
+- **Dépassement 64 Ko au chargement du noyau** (`boot.asm`) : la boucle de
+  lecture disque en mode réel incrémentait `BX` de 512 par secteur sans
+  jamais ajuster `ES`, plafonnant silencieusement à ~63-64 secteurs
+  chargeables avant un retour à zéro de `BX` (16 bits) qui écrase le début
+  du noyau déjà chargé. C'est pourquoi `KERNEL_SECTORS` valait exactement
+  63 à l'origine : ce n'était pas un choix arbitraire mais une limite
+  cachée du chargeur. Corrigé en détectant le dépassement (drapeau carry
+  après `add bx, 512`) et en avançant `ES` de `0x1000` (soit +64 Ko
+  physiques), ce qui permet désormais des noyaux de taille arbitraire.
 
 ## Limitations connues
 
-- L'IPC ne gère qu'un message en attente par tâche (pas de file) et n'est
-  pas bloquant : `ipc_recv` renvoie immédiatement si la boîte est vide.
+- Jusqu'à 4 messages IPC en attente par tâche (`MAILBOX_QUEUE_SIZE`), au
+  delà `ipc_send` échoue silencieusement (retour 0) ; non bloquant :
+  `ipc_recv` renvoie immédiatement si la boîte est vide.
 - Jusqu'à 6 espaces d'adressage isolés simultanés (`MAX_ADDR_SPACES` dans
   `kernel/paging.c`), tous types de tâches ring3 confondus (démo compilée
   au boot + jusqu'à 4 emplacements `exec` + marge).
-- La touche Shift ne modifie que les lettres (majuscules) ; les chiffres et
-  symboles restent non « shiftés » par simplicité.
+- La touche Shift gère lettres, chiffres et principaux symboles (disposition
+  US QWERTY simplifiée).
 - L'historique de commandes conserve les 8 dernières commandes (tampon
   circulaire), persistées sur disque (`history.dat`).
 - La zone argv réservée au bas de la pile de chaque tâche `exec` fait 512

@@ -9,13 +9,23 @@ typedef struct {
     uint32_t size_sect; // Taille en secteurs
 } __attribute__((packed)) FileEntry;
 
-#define FS_ROOT_LBA 64
+// LBA de départ du répertoire racine : juste après le secteur de boot (1)
+// et les KERNEL_SECTORS secteurs du noyau (cf. Makefile/boot.asm -
+// actuellement 80, doit rester synchronisé avec ce +1). Un embarquement de
+// programmes utilisateur plus gros dans le noyau nécessitera d'augmenter
+// à la fois KERNEL_SECTORS (Makefile + boot.asm) ET cette constante en
+// conséquence, pour ne jamais faire chevaucher le noyau et le système de
+// fichiers sur le disque.
+#define FS_ROOT_LBA 81
+#define FS_MAX_FILES 32 // Etait 15 (limite a 1 seul secteur) ; desormais etale sur plusieurs secteurs (cf. FS_ROOT_SECTORS)
 // Secteur dédié à la bitmap d'allocation des blocs de données (1 octet par
 // secteur, 0 = libre / 1 = utilisé) : remplace l'ancien allocateur "bump"
 // (next_free_lba) qui ne récupérait jamais l'espace libéré par fs_delete_file.
-#define FS_BITMAP_LBA 65
+// Placée juste après les FS_ROOT_SECTORS secteurs qu'occupe RootDirectory
+// (cf. fs.c : FS_ROOT_SECTORS = ceil(sizeof(RootDirectory)/512)).
+#define FS_BITMAP_LBA (FS_ROOT_LBA + 4) // 4 secteurs de marge, cf. static_assert dans fs.c
 // Zone de données de fichiers proprement dite (après le secteur bitmap).
-#define FS_DATA_LBA 66
+#define FS_DATA_LBA (FS_BITMAP_LBA + 1)
 // Réserve 512 secteurs (256 Ko, bitmap incluse) de zone de données après la
 // table racine ; la bitmap n'en décrit donc que FS_DATA_SECTORS-1.
 #define FS_DATA_SECTORS 512
@@ -24,7 +34,7 @@ typedef struct {
 
 typedef struct {
     uint32_t magic;
-    FileEntry files[15];
+    FileEntry files[FS_MAX_FILES];
     uint32_t next_free_lba; // Obsolete (ancien allocateur bump), conserve pour compatibilite de mise en page sur disque, non utilise.
     uint8_t reserved[24];
 } __attribute__((packed)) RootDirectory;

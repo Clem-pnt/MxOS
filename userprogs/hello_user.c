@@ -3,21 +3,10 @@
  * les règles Makefile dédiées, qui conservent les relocations via
  * `ld --emit-relocs`), chargé et RELOGÉ par kernel/elf.c avant exécution,
  * plutôt que compilé dans l'image du noyau comme l'était UserDemo. Il
- * n'utilise que l'interface syscall INT 0x80, exactement comme le ferait
- * un programme utilisateur réel.
+ * n'utilise que l'interface syscall INT 0x80 (via userprogs/libc.h),
+ * exactement comme le ferait un programme utilisateur réel.
  */
-#include <stdint.h>
-
-#define SYS_PRINT 1
-#define SYS_EXIT  2
-
-static void sys_print(const char *msg) {
-    __asm__ volatile("int $0x80" : : "a"(SYS_PRINT), "b"(msg) : "memory");
-}
-
-static void sys_exit(void) {
-    __asm__ volatile("int $0x80" : : "a"(SYS_EXIT));
-}
+#include "libc.h"
 
 /* Placé dans .text.start (cf. user.ld) pour être le tout premier octet du
  * binaire : e_entry pointera dessus, et c'est cette adresse (une fois
@@ -26,13 +15,13 @@ void user_main(void) __attribute__((section(".text.start")));
 
 void user_main(void) {
     // argc/argv sont transmis par kernel/exec.c via EBX/ECX (cf.
-    // create_user_task_argv, kernel/sched.c), lus ICI en tout premier avant
-    // que le prologue du compilateur ne puisse réutiliser ces registres.
-    // Convention "à la main" (pas de vrai ABI ici, c'est un OS educatif) :
-    // EBX = argc, ECX = argv (tableau de argc pointeurs + NULL final).
+    // create_user_task_argv, kernel/sched.c) : à lire ICI en tout premier,
+    // avant que le prologue du compilateur ne puisse réutiliser ces
+    // registres. Convention "à la main" (pas de vrai ABI ici, c'est un OS
+    // éducatif) : EBX = argc, ECX = argv (tableau de argc pointeurs + NULL).
     uint32_t argc;
     char **argv;
-    __asm__ volatile("" : "=b"(argc), "=c"(argv));
+    MXOS_READ_ARGV(argc, argv);
 
     sys_print("\n[UserProg] Hello depuis un programme charge du disque (exec) !\n");
 
@@ -46,7 +35,4 @@ void user_main(void) {
     }
 
     sys_exit();
-
-    /* Jamais atteint : sys_exit() ne revient pas. */
-    for (;;) { }
 }

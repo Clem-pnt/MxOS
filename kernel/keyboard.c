@@ -2,7 +2,13 @@
 #include "cpu.h"
 #include <stdint.h>
 
-static char key_queue[128];
+// Taille portée à 256 (maximum représentable par les index uint8_t, qui
+// bouclent naturellement modulo 256) : une file plus grande absorbe les
+// rafales de frappes pendant les opérations disque les plus lentes (ex.
+// sauvegarde du répertoire racine sur plusieurs secteurs + réécriture de
+// l'historique à chaque commande), qui pouvaient auparavant faire déborder
+// silencieusement une file de 128 octets et corrompre la saisie suivante.
+static char key_queue[256];
 static volatile uint8_t queue_read = 0;
 static volatile uint8_t queue_write = 0;
 

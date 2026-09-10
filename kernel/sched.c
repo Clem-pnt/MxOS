@@ -21,10 +21,16 @@ static int task_count = 0;
 
 // Cherche la prochaine tâche à exécuter. Ne renvoie JAMAIS l'ESP d'une tâche
 // inactive (ex: qui vient de se terminer et dont la pile a été libérée) :
-// - Passe 1 : tâche active et prête (ni endormie, ni réveil pas encore échu)
-// - Passe 2 (repli) : n'importe quelle tâche active, même encore endormie
+// - Passe 1 : parmi les tâches actives ET prêtes (ni endormie, ni réveil pas
+//   encore échu), on ne considère que celles ayant la PLUS HAUTE priorité
+//   présente (ex: le Shell, priorité 1, passe toujours avant une tâche
+//   ring3 de priorité 0), puis on choisit round-robin parmi celles-ci à
+//   partir de la tâche courante (équité entre tâches de même priorité).
+// - Passe 2 (repli) : n'importe quelle tâche active, même encore endormie,
+//   priorité ignorée (évite un blocage total si tout dort).
 static int find_next_task(void) {
     int next_task = -1;
+    int best_priority = -1;
 
     for (int i = 1; i <= MAX_TASKS; i++) {
         int candidate = (current_task + i) % MAX_TASKS;
@@ -38,8 +44,10 @@ static int find_next_task(void) {
             }
         }
 
-        next_task = candidate;
-        break;
+        if (tasks[candidate].priority > best_priority) {
+            best_priority = tasks[candidate].priority;
+            next_task = candidate;
+        }
     }
 
     if (next_task < 0) {
@@ -187,6 +195,15 @@ __attribute__((naked)) void timer_handler() {
     );
 }
 
+static void mailbox_reset(int i) {
+    tasks[i].mailbox_head = 0;
+    tasks[i].mailbox_count = 0;
+    for (int k = 0; k < MAILBOX_QUEUE_SIZE; k++) {
+        tasks[i].mailbox_len[k] = 0;
+        tasks[i].mailbox_sender[k] = -1;
+    }
+}
+
 int create_task(void (*entry)(), char* name) {
     if (task_count >= MAX_TASKS) return -1;
 
@@ -216,9 +233,8 @@ int create_task(void (*entry)(), char* name) {
     tasks[i].active = 1;
     tasks[i].name = name;
     tasks[i].addr_space = -1; // Tâche ring0 pure : partage le répertoire noyau
-    tasks[i].mailbox_has_msg = 0;
-    tasks[i].mailbox_len = 0;
-    tasks[i].mailbox_sender = -1;
+    mailbox_reset(i);
+    tasks[i].priority = 0;
     task_count++;
 
     return i;
@@ -307,9 +323,8 @@ int create_user_task_argv(void (*entry)(), char* name, uint32_t user_stack_top, 
     tasks[i].active = 1;
     tasks[i].name = name;
     tasks[i].addr_space = space;
-    tasks[i].mailbox_has_msg = 0;
-    tasks[i].mailbox_len = 0;
-    tasks[i].mailbox_sender = -1;
+    mailbox_reset(i);
+    tasks[i].priority = 0;
     task_count++;
 
     return i;
@@ -322,14 +337,19 @@ void init_multitasking() {
         tasks[i].sleeping = 0;
         tasks[i].wake_tick = 0;
         tasks[i].addr_space = -1;
-        tasks[i].mailbox_has_msg = 0;
-        tasks[i].mailbox_len = 0;
-        tasks[i].mailbox_sender = -1;
+        tasks[i].priority = 0;
+        mailbox_reset(i);
     }
 
     // Tâche 0 (Shell / Main) - l'état sera sauvegardé lors de la première interruption
     tasks[0].name = "Shell";
     tasks[0].active = 1;
+    tasks[0].priority = 0; // Même priorité par défaut que les autres tâches : donner au
+    // Shell une priorité PLUS HAUTE ici affamerait complètement toute autre
+    // tâche (le Shell est quasiment toujours "prêt", donc toujours réélu en
+    // premier), cf. find_next_task(). La priorité reste ajustable via
+    // task_set_priority() / la commande shell "priority <pid> <niveau>",
+    // à utiliser ponctuellement plutôt que comme réglage permanent du Shell.
     task_count = 1;
     current_task = 0;
 
@@ -377,42 +397,82 @@ int sched_current_pid(void) {
     return current_task;
 }
 
-// Dépose un message dans la boîte aux lettres de `target_pid`. Une seule
-// case en attente à la fois (pas de file) : si le destinataire n'a pas
-// encore consommé son message précédent, l'appel échoue (renvoie 0) et
-// l'appelant est libre de réessayer plus tard.
+// Termine une tâche arbitraire par PID, appelée directement depuis le
+// contexte du Shell (ring0, IF=1, PAS depuis un gestionnaire d'interruption) :
+// contrairement à task_exit_current()/task_exit_and_reschedule() qui ne
+// terminent QUE la tâche courante, ceci permet de tuer n'importe quelle
+// AUTRE tâche active (commande shell "kill <pid>") sans jamais se
+// requalifier soi-même. Refuse de tuer la tâche courante (le Shell, PID 0
+// en pratique) : ce cas nécessiterait la même gymnastique de rebasculement
+// que task_exit_and_reschedule, non nécessaire pour ce projet éducatif.
+int task_kill(int pid) {
+    if (pid < 0 || pid >= MAX_TASKS || !tasks[pid].active) return 0;
+    if (pid == current_task) return 0;
+
+    tasks[pid].active = 0;
+    tasks[pid].sleeping = 0;
+    if (task_count > 0) task_count--;
+    if (tasks[pid].stack_base) {
+        kfree((void*)tasks[pid].stack_base);
+        tasks[pid].stack_base = 0;
+    }
+    if (tasks[pid].addr_space >= 0) {
+        paging_free_task_directory(tasks[pid].addr_space);
+        tasks[pid].addr_space = -1;
+    }
+    mailbox_reset(pid);
+    return 1;
+}
+
+// Ajuste la priorité d'une tâche existante (0 = normale par défaut, cf.
+// find_next_task qui privilégie toujours la priorité la plus haute présente
+// parmi les tâches prêtes). Sans effet si le PID est invalide/inactif.
+void task_set_priority(int pid, int priority) {
+    if (pid < 0 || pid >= MAX_TASKS || !tasks[pid].active) return;
+    tasks[pid].priority = priority;
+}
+
+// Dépose un message dans la boîte aux lettres de `target_pid` : file
+// circulaire FIFO d'au plus MAILBOX_QUEUE_SIZE messages en attente (au
+// lieu d'une seule case comme auparavant). Si la file est déjà pleine,
+// l'appel échoue (renvoie 0) et l'appelant est libre de réessayer plus tard.
 int ipc_send(int target_pid, const void* data, uint32_t len) {
     if (target_pid < 0 || target_pid >= MAX_TASKS || !tasks[target_pid].active) return -1;
-    if (tasks[target_pid].mailbox_has_msg) return 0;
+    Task* dst_task = &tasks[target_pid];
+    if (dst_task->mailbox_count >= MAILBOX_QUEUE_SIZE) return 0;
 
-    if (len > sizeof(tasks[target_pid].mailbox)) len = sizeof(tasks[target_pid].mailbox);
+    if (len > sizeof(dst_task->mailbox[0])) len = sizeof(dst_task->mailbox[0]);
 
+    int slot = (dst_task->mailbox_head + dst_task->mailbox_count) % MAILBOX_QUEUE_SIZE;
     const uint8_t* src = (const uint8_t*)data;
     for (uint32_t k = 0; k < len; k++) {
-        tasks[target_pid].mailbox[k] = src[k];
+        dst_task->mailbox[slot][k] = src[k];
     }
-    tasks[target_pid].mailbox_len = len;
-    tasks[target_pid].mailbox_sender = current_task;
-    tasks[target_pid].mailbox_has_msg = 1;
+    dst_task->mailbox_len[slot] = len;
+    dst_task->mailbox_sender[slot] = current_task;
+    dst_task->mailbox_count++;
     return 1;
 }
 
-// Retire le message en attente de la tâche courante (s'il y en a un).
-// Copie jusqu'à `sizeof(mailbox)` octets dans `out` ; renseigne la taille
-// réelle et le PID expéditeur si les pointeurs correspondants sont fournis.
+// Retire le plus ancien message en attente de la tâche courante (FIFO),
+// s'il y en a un. Copie jusqu'à `sizeof(mailbox[0])` octets dans `out` ;
+// renseigne la taille réelle et le PID expéditeur si les pointeurs
+// correspondants sont fournis.
 int ipc_recv(void* out, uint32_t* out_len, int* out_sender) {
     Task* self = &tasks[current_task];
-    if (!self->mailbox_has_msg) return 0;
+    if (self->mailbox_count == 0) return 0;
 
-    uint32_t len = self->mailbox_len;
+    int slot = self->mailbox_head;
+    uint32_t len = self->mailbox_len[slot];
     uint8_t* dst = (uint8_t*)out;
     for (uint32_t k = 0; k < len; k++) {
-        dst[k] = (uint8_t)self->mailbox[k];
+        dst[k] = (uint8_t)self->mailbox[slot][k];
     }
     if (out_len) *out_len = len;
-    if (out_sender) *out_sender = self->mailbox_sender;
+    if (out_sender) *out_sender = self->mailbox_sender[slot];
 
-    self->mailbox_has_msg = 0;
-    self->mailbox_sender = -1;
+    self->mailbox_head = (self->mailbox_head + 1) % MAILBOX_QUEUE_SIZE;
+    self->mailbox_count--;
     return 1;
 }
+

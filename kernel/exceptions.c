@@ -72,6 +72,12 @@ static void exception_report(uint32_t *regs) {
     kprint_hex(error_code);
     kprint(") at EIP=");
     kprint_hex(eip);
+    if (vector == 14) {
+        uint32_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        kprint(" CR2=");
+        kprint_hex(cr2);
+    }
     kprint(" - System Halted ***\n");
 
     for (;;) {

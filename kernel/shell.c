@@ -209,7 +209,7 @@ void shell_execute() {
     history_nav = -1;
 
     if (m_strcmp(input_buffer, "help") == 0) {
-        kprint("Commandes : help, clear, ver, ls, cat <file>, write <file> <contenu>,\nrm <file>, exec <file> [args...], ps, mem, uptime, reboot");
+        kprint("Commandes : help, clear, ver, ls, cat <file>, write <file> <contenu>,\nrm <file>, exec <file> [args...], ps, kill <pid>, priority <pid> <niveau>,\nmem, uptime, reboot");
     } 
     else if (m_strcmp(input_buffer, "clear") == 0) {
         clear_screen();
@@ -252,6 +252,50 @@ void shell_execute() {
     }
     else if (m_strcmp(input_buffer, "ps") == 0) {
         sched_dump_tasks();
+    }
+    else if (m_strncmp(input_buffer, "kill ", 5) == 0) {
+        char *p = input_buffer + 5;
+        while (*p == ' ') p++;
+        if (*p < '0' || *p > '9') {
+            kprint("Usage : kill <pid>");
+        } else {
+            int pid = 0;
+            while (*p >= '0' && *p <= '9') { pid = pid * 10 + (*p - '0'); p++; }
+            if (task_kill(pid)) {
+                kprint("Tache ");
+                kprint_dec(pid);
+                kprint(" terminee.");
+            } else {
+                kprint("Impossible de terminer cette tache (PID invalide, inactive, ou tache courante).");
+            }
+        }
+    }
+    else if (m_strncmp(input_buffer, "priority ", 9) == 0) {
+        // Ajuste manuellement la priorité d'une tâche (0 = normale par
+        // defaut). ATTENTION : donner une priorité strictement supérieure
+        // à celle du Shell (0) à une tâche BUSY-LOOP (jamais endormie)
+        // peut l'affamer complètement (cf. find_next_task, kernel/sched.c) ;
+        // à utiliser avec parcimonie, essentiellement pour la démonstration.
+        char *p = input_buffer + 9;
+        while (*p == ' ') p++;
+        if (*p < '0' || *p > '9') {
+            kprint("Usage : priority <pid> <niveau>");
+        } else {
+            int pid = 0;
+            while (*p >= '0' && *p <= '9') { pid = pid * 10 + (*p - '0'); p++; }
+            while (*p == ' ') p++;
+            int neg = 0;
+            if (*p == '-') { neg = 1; p++; }
+            if (*p < '0' || *p > '9') {
+                kprint("Usage : priority <pid> <niveau>");
+            } else {
+                int level = 0;
+                while (*p >= '0' && *p <= '9') { level = level * 10 + (*p - '0'); p++; }
+                if (neg) level = -level;
+                task_set_priority(pid, level);
+                kprint("Priorite mise a jour.");
+            }
+        }
     }
     else if (m_strncmp(input_buffer, "write ", 6) == 0) {
         char *args = input_buffer + 6;

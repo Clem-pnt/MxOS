@@ -46,14 +46,19 @@ static int slot_pid[MAX_EXEC_SLOTS] = { -1, -1, -1, -1 };
 // plat : conserve les en-têtes de programme et les relocations).
 extern uint8_t _binary_hello_user_elf_start[];
 extern uint8_t _binary_hello_user_elf_end[];
+extern uint8_t _binary_echo_user_elf_start[];
+extern uint8_t _binary_echo_user_elf_end[];
 
 void exec_seed_programs(void) {
-    if (fs_file_exists("hello")) return;
+    if (!fs_file_exists("hello")) {
+        uint32_t size = (uint32_t)(_binary_hello_user_elf_end - _binary_hello_user_elf_start);
+        if (size > 0) fs_write_file("hello", _binary_hello_user_elf_start, size);
+    }
 
-    uint32_t size = (uint32_t)(_binary_hello_user_elf_end - _binary_hello_user_elf_start);
-    if (size == 0) return;
-
-    fs_write_file("hello", _binary_hello_user_elf_start, size);
+    if (!fs_file_exists("echo")) {
+        uint32_t size = (uint32_t)(_binary_echo_user_elf_end - _binary_echo_user_elf_start);
+        if (size > 0) fs_write_file("echo", _binary_echo_user_elf_start, size);
+    }
 }
 
 // Trouve un slot libre (jamais utilisé, ou dont la tâche précédente est

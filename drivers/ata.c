@@ -22,7 +22,9 @@ static int ata_wait_ready() {
     return 0;
 }
 
-int ata_read_sector(uint32_t lba, uint16_t *buffer) {
+// Version "single-shot" de la lecture d'un secteur (sans retry) : logique
+// originale, renommée pour être enveloppée par ata_read_sector() ci-dessous.
+static int ata_read_sector_once(uint32_t lba, uint16_t *buffer) {
     if (!ata_wait_bsy_clear()) return 0;
 
     // Sélection du drive (0xE0 = Master + LBA) et bits 24-27 de l'adresse
@@ -42,7 +44,8 @@ int ata_read_sector(uint32_t lba, uint16_t *buffer) {
     return 1;
 }
 
-int ata_write_sector(uint32_t lba, uint16_t *buffer) {
+// Version "single-shot" de l'écriture d'un secteur (sans retry).
+static int ata_write_sector_once(uint32_t lba, uint16_t *buffer) {
     if (!ata_wait_bsy_clear()) return 0;
 
     outb(ATA_DRIVE_SEL, 0xE0 | ((lba >> 24) & 0x0F));
@@ -55,14 +58,34 @@ int ata_write_sector(uint32_t lba, uint16_t *buffer) {
     if (!ata_wait_ready()) return 0;
 
     // On écrit les 512 octets (256 mots de 16 bits)
-    
+
     for (int i = 0; i < 256; i++) {
         uint16_t data = buffer[i];
         __asm__ volatile("outw %w0, %w1" : : "a"(data), "Nd"(ATA_DATA));
     }
-    
+
     // On force le disque à vider son cache (cette commande ne pose pas DRQ,
     // donc on attend seulement que BSY retombe).
     outb(ATA_COMMAND, 0xE7); // Cache Flush
     return ata_wait_bsy_clear();
+}
+
+// Nombre de tentatives avant d'abandonner une opération disque : un échec
+// isolé (bruit électrique, contrôleur temporairement occupé, etc.) sur un
+// disque virtuel/réel simple ne doit pas immédiatement faire échouer toute
+// une écriture de fichier ; on retente quelques fois avant de renoncer.
+#define ATA_MAX_RETRIES 3
+
+int ata_read_sector(uint32_t lba, uint16_t *buffer) {
+    for (int attempt = 0; attempt < ATA_MAX_RETRIES; attempt++) {
+        if (ata_read_sector_once(lba, buffer)) return 1;
+    }
+    return 0;
+}
+
+int ata_write_sector(uint32_t lba, uint16_t *buffer) {
+    for (int attempt = 0; attempt < ATA_MAX_RETRIES; attempt++) {
+        if (ata_write_sector_once(lba, buffer)) return 1;
+    }
+    return 0;
 }
