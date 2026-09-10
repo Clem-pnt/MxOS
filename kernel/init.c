@@ -6,6 +6,8 @@
 #include "kernel/exceptions.h"
 #include "kernel/pit.h"
 #include "kernel/syscall.h"
+#include "kernel/gdt.h"
+#include "kernel/usermode.h"
 #include "../drivers/fs.h"
 #include "mem.h"  
 #include "shell.h"
@@ -25,6 +27,7 @@ void main_entry() {
     clear_screen();
     kprint("MxOS Kernel Loading...\n");
 
+    gdt_init();
     remap_pic();
 
     install_exception_handlers();
@@ -48,6 +51,9 @@ void main_entry() {
     init_multitasking();
     if (create_task(task_clock, "Clock") < 0) {
         kprint("Warning: unable to create clock task.\n");
+    }
+    if (create_user_task(user_task_demo, "UserDemo", user_demo_stack_top()) < 0) {
+        kprint("Warning: unable to create user demo task.\n");
     }
 
     __asm__ volatile("sti");

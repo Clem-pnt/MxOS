@@ -10,19 +10,25 @@ struct registers {
 };
 
 // Convention : eax = numéro d'appel système, ebx/ecx/edx = arguments.
-static void syscall_dispatch(struct registers *regs) {
+// Renvoie l'ESP à charger avant l'iret : identique à l'ESP courant dans le
+// cas général, mais différent si SYS_EXIT/SYS_SLEEP ont fait basculer vers
+// une autre tâche (cf. task_exit_and_reschedule/task_sleep_and_reschedule).
+// C'est indispensable car `int 0x80` utilise une porte d'interruption (IF=0
+// pendant son exécution) : on ne peut pas attendre un tick d'horloge pour
+// être repris, il faut resélectionner explicitement la tâche suivante ici.
+static uint32_t syscall_dispatch(struct registers *regs) {
+    uint32_t current_esp = (uint32_t)regs;
+
     switch (regs->eax) {
         case SYS_PRINT:
             kprint((char*)regs->ebx);
-            break;
+            return current_esp;
         case SYS_EXIT:
-            task_exit_current();
-            break;
+            return task_exit_and_reschedule(current_esp);
         case SYS_SLEEP:
-            task_sleep(regs->ebx);
-            break;
+            return task_sleep_and_reschedule(regs->ebx, current_esp);
         default:
-            break;
+            return current_esp;
     }
 }
 
@@ -33,6 +39,7 @@ __attribute__((naked)) static void syscall_handler(void) {
         "pushl %eax\n"
         "call syscall_dispatch\n"
         "addl $4, %esp\n"
+        "movl %eax, %esp\n"  // Recharge l'ESP (potentiellement celui d'une autre tâche)
         "popal\n"
         "iret\n"
     );

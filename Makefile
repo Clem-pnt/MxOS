@@ -14,6 +14,7 @@ KERNEL_OBJECTS := kernel.o \
 	kernel/init.o kernel/cpu.o kernel/interrupts.o kernel/mem.o \
 	kernel/screen.o kernel/sched.o kernel/shell.o kernel/keyboard.o \
 	kernel/paging.o kernel/exceptions.o kernel/pit.o kernel/syscall.o \
+	kernel/gdt.o kernel/usermode.o \
 	drivers/ata.o drivers/fs.o
 
 DATA_SECTORS := 512
