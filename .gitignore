@@ -1,0 +1,12 @@
+# Artefacts de compilation
+*.o
+*.tmp
+*.bin
+*.img
+
+# Exceptions : fichiers sources assembleur (boot.asm n'est pas concerné, il finit en .asm pas .bin)
+!boot.asm
+
+# Fichiers temporaires d'édition
+*~
+*.swp
